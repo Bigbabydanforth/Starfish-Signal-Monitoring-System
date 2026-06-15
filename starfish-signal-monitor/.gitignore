@@ -1,0 +1,28 @@
+# Environment variables — NEVER commit
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Temporary files and logs
+.tmp/
+!.tmp/.gitkeep
+
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
