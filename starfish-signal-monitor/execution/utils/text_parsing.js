@@ -211,6 +211,18 @@ function isGarbageName(name) {
   return GARBAGE_PATTERNS.some(p => p.test(name));
 }
 
+// Sanitize a raw revenue value from external APIs before it enters the pipeline.
+// Rejects negatives, non-numbers, and absurdly large values (> $100T = data error).
+// Returns the numeric value or null if invalid.
+function sanitizeRevenue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (!isFinite(num) || isNaN(num)) return null;
+  if (num < 0)               return null; // negative revenue is invalid
+  if (num > 100_000_000_000_000) return null; // > $100T — clearly a data error
+  return num;
+}
+
 // Format a revenue number into a human-readable string: "$250M", "$1.2B", etc.
 function formatRevenue(revenue) {
   if (!revenue || revenue <= 0) return null;
@@ -227,11 +239,24 @@ function formatNumber(num) {
   return num.toLocaleString();
 }
 
+// Sanitize a string before passing to external APIs (Apollo, Hunter, PDL).
+// Strips control characters, trims whitespace, and enforces a max length.
+// Prevents garbage data or injection attempts from reaching API requests.
+function sanitizeApiInput(value, maxLength = 200) {
+  if (!value || typeof value !== 'string') return '';
+  return value
+    .replace(/[\x00-\x1F\x7F]/g, '') // strip control characters
+    .trim()
+    .slice(0, maxLength);
+}
+
 export {
   extractCompanyName,
   parseHeadquarters,
   normalizeCompanyName,
   isGarbageName,
   formatRevenue,
-  formatNumber
+  formatNumber,
+  sanitizeApiInput,
+  sanitizeRevenue
 };

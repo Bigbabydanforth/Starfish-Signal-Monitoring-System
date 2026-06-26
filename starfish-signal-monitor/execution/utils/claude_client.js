@@ -112,12 +112,15 @@ function parseAndValidate(text) {
 }
 
 async function callClaude(userMessage) {
-  const message = await client.messages.create({
-    model:      CLAUDE_MODEL,
-    max_tokens: 1000,
-    system:     SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userMessage }]
-  });
+  const message = await client.messages.create(
+    {
+      model:      CLAUDE_MODEL,
+      max_tokens: 1000,
+      system:     SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userMessage }]
+    },
+    { timeout: 30_000 }  // 30s — prevents pipeline hang if Claude API is slow
+  );
 
   const text = message.content[0]?.text;
   if (!text) throw new Error('Claude returned an empty response body');

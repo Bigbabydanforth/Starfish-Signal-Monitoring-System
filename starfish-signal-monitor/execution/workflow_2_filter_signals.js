@@ -6,7 +6,7 @@ import { dirname as dirOf, resolve } from 'path';
 
 import { enrichSignal } from './utils/claude_client.js';
 import { getTodayStamp } from './utils/date_helpers.js';
-import { formatRevenue, formatNumber, isGarbageName } from './utils/text_parsing.js';
+import { formatRevenue, formatNumber, isGarbageName, sanitizeApiInput } from './utils/text_parsing.js';
 import { sendErrorAlert } from './utils/telegram_client.js';
 
 const __filename_w2 = toPath(import.meta.url);
@@ -118,10 +118,10 @@ async function fetchMaCSuite(companyName, websiteUrl) {
   try {
     const baseUrl = process.env.APOLLO_API_URL || 'https://api.apollo.io/v1';
     const domain = websiteUrl
-      ? websiteUrl.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '')
+      ? sanitizeApiInput(websiteUrl.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, ''))
       : null;
     const body = {
-      q_organization_name:   companyName,
+      q_organization_name:   sanitizeApiInput(companyName),
       person_titles: [
         'CEO', 'Chief Executive Officer',
         'COO', 'Chief Operating Officer',
@@ -143,7 +143,7 @@ async function fetchMaCSuite(companyName, websiteUrl) {
       page:     1,
       per_page: 10
     };
-    const res = await axios.post(`${baseUrl}/mixed_people/search`, body, {
+    const res = await axios.post(`${baseUrl}/mixed_people/api_search`, body, {
       headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Content-Type': 'application/json' },
       timeout: 15000
     });
@@ -152,6 +152,7 @@ async function fetchMaCSuite(companyName, websiteUrl) {
       name:         `${p.first_name || ''} ${p.last_name || ''}`.trim(),
       title:        p.title || null,
       email:        p.email || null,
+      email_status: p.email_status || null,  // needed for verifyEmail() in workflow_4
       linkedin_url: p.linkedin_url || null
     })).filter(p => p.name);
   } catch {
@@ -344,14 +345,67 @@ function passesJobTitleFilter(signal) {
   // (school, sports team, church, etc.) — these are never Starfish branding clients.
   // AudienceLab auto-passes the size filter so this is the only gate for these org types.
   if (signal.type === 'Brand Strategy Intent') {
+    const firstName = signal.person?.first_name?.trim();
+    const lastName  = signal.person?.last_name?.trim();
     const title = (signal.person?.title || '').toLowerCase().trim();
-    if (title) {
-      const isNonCommercial = NON_COMMERCIAL_TITLE_KEYWORDS.some(k => title.includes(k));
-      if (isNonCommercial) {
-        console.log(`  [Filter] ❌ BSI dropped — non-commercial title: "${signal.person.title}" at ${signal.company?.name}`);
-        return false;
-      }
+
+    // Drop if no named person
+    if (!firstName) {
+      console.log(`  [Filter] ❌ BSI dropped — no person identified: ${signal.company?.name}`);
+      return false;
     }
+
+    // Drop if title is missing or unknown
+    if (!title || title === 'unknown') {
+      console.log(`  [Filter] ❌ BSI dropped — unknown title: ${firstName} ${lastName || ''} at ${signal.company?.name}`);
+      return false;
+    }
+
+    // Drop non-commercial titles (coach, teacher, pastor, etc.)
+    const isNonCommercial = NON_COMMERCIAL_TITLE_KEYWORDS.some(k => title.includes(k));
+    if (isNonCommercial) {
+      console.log(`  [Filter] ❌ BSI dropped — non-commercial title: "${signal.person.title}" at ${signal.company?.name}`);
+      return false;
+    }
+
+    // Marketing/brand C-suite — use word-boundary regex for short acronyms so
+    // 'cco' doesn't match inside "account" (a-cco-unt), 'cmo' doesn't match "camo", etc.
+    if (/\bcmo\b/.test(title) || /\bcbo\b/.test(title) || /\bcco\b/.test(title) ||
+        title.includes('chief marketing') || title.includes('chief brand') || title.includes('chief communications')) return true;
+
+    // Bare senior titles with no role qualifier — seniority is clear, function is unknown.
+    // For BSI the actual outreach contact is found via Apollo broadcast in workflow_4,
+    // so these are worth keeping regardless of what function the triggering person holds.
+    // Titles WITH a non-marketing qualifier (e.g. "President of Sales", "COO of Finance")
+    // still fall through to the hasSeniority + hasRelevance check below and drop correctly.
+    // Partner is included because law firms and consulting firms are Starfish niches.
+    const BARE_SENIOR_TITLES = new Set([
+      'vice president', 'vp',
+      'president', 'ceo', 'chief executive officer',
+      'coo', 'chief operating officer',
+      'svp', 'evp',
+      'partner'
+    ]);
+    if (BARE_SENIOR_TITLES.has(title)) return true;
+
+    // All other titles: must have seniority AND explicit marketing/brand relevance.
+    const hasSeniority = [
+      'chief', 'ceo', 'coo', 'president',
+      'vice president', 'svp', 'evp',
+      'director', 'head of'
+    ].some(k => title.includes(k)) || /\bvp\b/.test(title);
+
+    // 'communication' (singular) catches both "communication" and "communications" titles.
+    // 'mktg' catches abbreviated marketing titles (e.g. "Sr Director Mktg").
+    // 'creative' catches creative director / SVP Creative roles (brand-adjacent work).
+    // 'media' catches media strategy, media relations, digital media roles.
+    const hasRelevance = ['marketing', 'mktg', 'brand', 'growth', 'communication', 'creative', 'media'].some(k => title.includes(k));
+
+    if (!hasSeniority || !hasRelevance) {
+      console.log(`  [Filter] ❌ BSI dropped — title not senior marketing/brand: "${signal.person.title}" at ${signal.company?.name}`);
+      return false;
+    }
+
     return true;
   }
 
@@ -371,9 +425,10 @@ function passesJobTitleFilter(signal) {
       return false;
     }
 
-    // Marketing/brand C-suite acronyms — inherently both senior AND relevant
-    const MARKETING_CSUITE = ['cmo', 'cbo', 'cco', 'chief marketing', 'chief brand', 'chief communications'];
-    if (MARKETING_CSUITE.some(k => title.includes(k))) return true;
+    // Marketing/brand C-suite — use word-boundary regex for short acronyms so
+    // 'cco' doesn't match inside "account" (a-cco-unt), 'cmo' doesn't match "camo", etc.
+    if (/\bcmo\b/.test(title) || /\bcbo\b/.test(title) || /\bcco\b/.test(title) ||
+        title.includes('chief marketing') || title.includes('chief brand') || title.includes('chief communications')) return true;
 
     // All other titles: must have seniority AND explicit marketing/brand relevance.
     // VP is matched with a word-boundary regex (\bvp\b) so "VP, Marketing" (comma),
@@ -585,7 +640,7 @@ async function filterSignals(allSignals) {
 
   // Runs `fn` on all items in parallel, at most `concurrency` at a time, preserving order.
   // Uses Promise.allSettled so a single item failure never stops the remaining batches from running.
-  async function runBatched(items, concurrency, fn) {
+  async function runBatched(items, concurrency, fn, interBatchDelayMs = 300) {
     const results = [];
     for (let i = 0; i < items.length; i += concurrency) {
       const batch = items.slice(i, i + concurrency);
@@ -601,6 +656,11 @@ async function filterSignals(allSignals) {
           // claudeEnrich: .signal is the item, .failure is absent (signal preserved without enrichment).
           results.push({ signal: batch[j], keep: true });
         }
+      }
+      // Brief pause between batches — prevents burst traffic that triggers 429s on
+      // rate-limited APIs (Apollo, Claude) when processing large signal sets.
+      if (i + concurrency < items.length) {
+        await new Promise(r => setTimeout(r, interBatchDelayMs));
       }
     }
     return results;

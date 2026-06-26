@@ -8,16 +8,38 @@ function getBase() {
     .base(process.env.AIRTABLE_BASE_ID);
 }
 
+// Exponential backoff retry for transient Airtable errors (429, 503, timeouts).
+// Attempts: up to maxAttempts, with delay doubling each time + ±20% jitter.
+// Throws on the final attempt so the caller's error handling still fires.
+async function withBackoff(fn, label, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.response?.status ?? err.status;
+      const isTransient = status === 429 || status === 503 || /timeout/i.test(err.message);
+      if (!isTransient || attempt === maxAttempts) throw err;
+      const baseDelay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+      const jitter    = baseDelay * 0.2 * (Math.random() * 2 - 1);
+      const delay     = Math.round(baseDelay + jitter);
+      console.warn(`[Airtable] ${label} — transient error (${status ?? err.message}), retry ${attempt}/${maxAttempts - 1} in ${(delay / 1000).toFixed(1)}s`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 // Query records from the Signals table.
 // options: { filterByFormula, fields, maxRecords, sort }
 // Returns: array of Airtable record objects
 // Enforces a 30-second timeout — Airtable SDK has no built-in timeout and can hang indefinitely.
 async function query(options = {}, timeoutMs = 30000) {
-  const queryPromise = getBase()(TABLE).select(options).all();
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Airtable query timed out after ${timeoutMs}ms`)), timeoutMs)
-  );
-  return Promise.race([queryPromise, timeoutPromise]);
+  return withBackoff(async () => {
+    const queryPromise   = getBase()(TABLE).select(options).all();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Airtable query timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    return Promise.race([queryPromise, timeoutPromise]);
+  }, 'query');
 }
 
 // Create multiple records in the Signals table.
@@ -26,11 +48,13 @@ async function query(options = {}, timeoutMs = 30000) {
 // Enforces a 30-second timeout — same as query() — to prevent the pipeline hanging
 // indefinitely if Airtable drops the connection mid-write.
 async function createRecords(records, timeoutMs = 30000) {
-  const writePromise   = getBase()(TABLE).create(records);
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Airtable create timed out after ${timeoutMs}ms`)), timeoutMs)
-  );
-  return Promise.race([writePromise, timeoutPromise]);
+  return withBackoff(async () => {
+    const writePromise   = getBase()(TABLE).create(records);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Airtable create timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    return Promise.race([writePromise, timeoutPromise]);
+  }, 'createRecords');
 }
 
 // Create records in a specific base + table (used for AudienceLab separate base).

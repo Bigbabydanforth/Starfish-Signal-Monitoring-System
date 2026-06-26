@@ -55,6 +55,15 @@ async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailS
       message += `⚠️ Airtable save failed (see logs)\n`;
     }
 
+    // Email verification summary (excludes BSI — per-contact model, not per-signal)
+    const nonBSI = deduplicatedSignals.filter(s => s.type !== 'Brand Strategy Intent');
+    if (nonBSI.length > 0) {
+      const verifiedCount  = nonBSI.filter(s => s.emailVerification?.valid && !s.emailVerification?.flagged).length;
+      const flaggedCount   = nonBSI.filter(s => s.emailVerification?.flagged).length;
+      const discardedCount = nonBSI.filter(s => !s.emailVerification?.valid).length;
+      message += `\n📧 Emails verified: ${verifiedCount} clean, ${flaggedCount} flagged, ${discardedCount} discarded`;
+    }
+
     message += `\n⏱️ Total execution time: ${duration}s`;
 
     // Truncate if over Telegram's 4096 char limit

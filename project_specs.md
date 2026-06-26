@@ -11,7 +11,6 @@ This document defines what we are building, as required by Step 1 of `instructio
 **Delivery Date:** May 22, 2026
 
 ---
-
 ## 1. Inputs
 
 **What the user can send as input:** NONE. This system runs fully automatically with zero user interaction during the pilot phase. No Telegram commands, no web interface, no manual triggers.
@@ -2276,7 +2275,7 @@ Top 3 Signals:
 | Field Name | Type | Required | Default | Max Length | Validation | Notes |
 |------------|------|----------|---------|------------|------------|-------|
 | Company Name | Single line text | Yes | - | 255 chars | No special chars except &, ., Inc, Corp, LLC | Primary identifier for deduplication |
-| Signal Type | Single select | Yes | - | - | Options: "Job Change", "News/Press", "M&A Activity", "Rebrand" | Source category |
+| Signal Type | Single select | Yes | - | - | Options: "Job Change", "News/Press", "M&A Activity", "Rebrand", "Website Visitor", "Brand Strategy Intent" | Source category |
 | Signal Details | Long text | Yes | - | 2000 chars | None | Full description, auto-truncated if >2000 |
 | Contact Info | Long text | No | null | 500 chars | None | Name, title, LinkedIn, email if available |
 | Company Revenue | Number | No | null | - | Must be ≥ 0 | Annual revenue in USD, formatted with precision 0 |
@@ -2717,6 +2716,9 @@ This document defines EXACTLY what will be built for Starfish Signal Monitor Pil
 - **Puppeteer dead-slot fix** — `_releaseSlot` now re-queues failed waiters to front of queue instead of silently discarding them, preventing dead browser slots.
 - **Sheets append fix** — Replaced manual column-A row counting + `values.update()` with `values.append()`. Immune to blank company name rows that previously caused silent overwrites.
 - **Sheets AudienceLab path** — When `AUDIENCELAB_AIRTABLE_BASE_ID` is set, Workflow 4b syncs from in-memory signals (not Airtable query) to include AudienceLab records from the separate base.
+- **`send_missing_to_starfish.js`** — One-time utility to find Airtable records not yet in Google Sheets, append all rows to Sheets (test/dev run only — production skips to avoid double-writing), and send one email card per company to Starfish. BSI companies with multiple contacts show a contact count instead of repeating cards. Run test first, then `NODE_ENV=production` to send to Starfish.
+- **`backfill_to_sheets.js`** — One-time utility to rewrite all Google Sheet rows from Airtable from scratch (clears rows 5+, never touches dashboard header rows 1–4). Supports `--dry-run` and `--date YYYY-MM-DD` flags. Use when Sheets is out of sync after a bulk Airtable import.
+- **`get_refresh_token.js`** — One-time utility to regenerate a Google OAuth2 refresh token. Run when `invalid_grant` error appears on Sheets writes. Spins up a local server on port 3000, prints an auth URL, captures the redirect, and prints the new token to copy into `.env`.
 
 **Not in Phase 1 scope (future full build):**
 - React dashboard
@@ -2729,3 +2731,385 @@ This document defines EXACTLY what will be built for Starfish Signal Monitor Pil
 3. Switch EMAIL_TO_PRODUCTION to client emails if not already done
 4. Handoff package and payment
 5. Full build consideration ($6,500) if pilot successful
+
+---
+
+---
+
+# Part 2: Starfish Signal Dashboard (MVP)
+
+This section defines the React dashboard built on top of the existing signal monitor. The signal monitor (Part 1) is already built and running on Railway — this dashboard is read-only from its perspective.
+
+**Project:** Starfish Signal Dashboard (MVP)
+**Client:** Starfish Co. (David Kessler, Zack Kessler, Carly Cygielman)
+**Developer:** Gideon Awotuyi
+**Branch:** `react-dashboard`
+**Purpose:** A React web dashboard so Carly, David, and Zack can review AI-detected intent signals, manage their outreach status, and push contacts to HubSpot — all in one place.
+
+---
+
+## 1. What the App Does and Who Uses It
+
+The Starfish Signal Monitor detects companies that may need Starfish's branding services — based on job changes, M&A activity, press releases, website visits, and brand strategy intent. It saves those signals to a Supabase database every morning at 5 AM EST.
+
+This dashboard is the front door to that data. It is used by three people:
+
+- **Carly Cygielman** — handles outreach. She works signals daily: reviewing them, updating their status, and pushing contacts to HubSpot.
+- **David Kessler** — reviews signal quality and monitors what's coming in.
+- **Zack Kessler** — reviews signal quality and monitors what's coming in.
+
+All three log in with email + password via Supabase Auth. No role-based access in MVP.
+
+**The dashboard does NOT generate signals.** It only reads, displays, and manages signals that the Railway signal monitor has already saved to Supabase.
+
+---
+
+## 2. Dashboard Workflows
+
+### Workflow 1: Login
+- User visits `/login`
+- Enters email + password
+- Supabase Auth validates credentials (`signInWithPassword()`)
+- On success → redirect to `/signals`
+- On failure → show inline error: "Invalid email or password"
+- Session persisted in localStorage by `@supabase/supabase-js` — user stays logged in on refresh
+- No sign-up flow. No forgot password. Accounts created manually by Gideon in Supabase dashboard.
+
+### Workflow 2: View Signals Table
+- User lands on `/signals` (protected — redirect to `/login` if not authenticated)
+- React calls `GET /api/signals` on mount → Express queries Supabase `signals` table using service-role key
+- Table columns: Company Name, Signal Type badge, Priority badge, Contact Name + Title, Date Detected, Status chip, HubSpot Push button
+- Stats Bar at top: total signals today, HIGH count, MEDIUM count, LOW count
+- Filters: Signal Type multi-select, Priority multi-select — client-side, no new API call
+- Sort: Date Detected (default: newest first) or Priority (HIGH → MEDIUM → LOW) — client-side
+- Click any row → navigate to `/signals/:id`
+
+### Workflow 3: View Signal Detail
+- User clicks a row → navigates to `/signals/:id`
+- React calls `GET /api/signals/:id` → Express returns full signal record from Supabase
+- Displays: Company Name, Industry, Revenue (formatted), Employee Count, Signal Type, trigger details, Contact Name, Title, Email (clickable mailto), LinkedIn URL (new tab), Claude Brief, Contact Approach, Source URL
+- BSI signals only: table of all broadcast contacts with Send Day (1–5) column
+- Back button → returns to `/signals`
+
+### Workflow 4: Update Signal Status
+- User changes status dropdown (on table row or detail view)
+- Options: `New` → `In Progress` → `Contacted` → `Won` → `Not a Fit`
+- Immediate optimistic UI update + `PATCH /api/signals/:id/status` call in background
+- On success: "Saved ✓" inline for 2 seconds
+- On failure: reverts dropdown to previous value + shows inline error
+
+### Workflow 5: Push Signal to HubSpot
+- User clicks "Push to HubSpot" → button shows "Pushing..." and disables
+- React calls `POST /api/signals/:id/push-to-hubspot`
+- Express calls HubSpot Contacts API using the signal's email as the deduplication key
+- On success (200 or 409): Express sets `hubspot_pushed = true` in Supabase → button shows "Pushed to HubSpot ✓" permanently grayed out
+- On failure: Express returns 500 → button re-enables + shows "HubSpot push failed. Try again."
+- Signal can only be pushed once. Button permanently disabled after first successful push.
+
+---
+
+## 3. Dashboard Tools and Services
+
+| Tool | Role |
+|------|------|
+| React (Vite) | Frontend SPA — all pages the user sees |
+| React Router v6 | Client-side routing between pages |
+| Axios | HTTP calls from React to Express API |
+| Node.js + Express | Backend API — reads Airtable, calls HubSpot |
+| Airtable | **Primary data store** — all 1,000+ signals live here. Express reads/writes via the official `airtable` SDK. React NEVER talks to Airtable directly. |
+| Supabase Auth | **Auth only** — email + password login, session persistence via `@supabase/supabase-js`. No signal data stored in Supabase. |
+| HubSpot Private App | Receives pushed contacts via REST API (`HUBSPOT_TOKEN`) |
+| Vercel | Hosts the React frontend |
+| Railway | Hosts the Express backend (same project as signal monitor) |
+
+> **Critical architecture note:** Signal data lives in **Airtable**, NOT Supabase. Supabase is used exclusively for authentication. This was discovered during Phase 11 build when it was confirmed all 1,000+ signals were already in Airtable from the signal monitor pipeline. The original spec assumed Supabase as the data store — that assumption is wrong. Any reference to "Supabase signals table" in this document means Airtable.
+
+---
+
+## 4. Pages and Routes
+
+| Route | Page | File | Auth Required |
+|-------|------|------|---------------|
+| `/` | Landing page (public home) | `src/pages/Home.jsx` | No |
+| `/login` | Premium login (two-column) | `src/pages/Login.jsx` | No — redirects to `/signals` if already logged in |
+| `/signals` | Signals Table (main view) | `src/pages/SignalsTable.jsx` | Yes |
+| `/signals/:id` | Signal Detail View | `src/pages/SignalDetail.jsx` | Yes |
+
+Any unauthenticated access to `/signals` or `/signals/:id` redirects to `/login`.
+Unknown routes (`*`) redirect to `/`.
+`/login` auto-redirects to `/signals` if a valid session already exists (prevents logged-in users from seeing the login form).
+
+---
+
+## 5. Data Model
+
+### Airtable Table: `Signals` (base `appqr1HuoCv37loST`, table `tblYDV2IQ6dsPnmfI`)
+
+Written by the Railway signal monitor. Dashboard reads all fields and writes `Status` and `HubSpot Pushed`. All field names in Airtable use Title Case — the Express `mapRecord()` function converts them to snake_case for the React frontend.
+
+| Airtable Field (Title Case) | JS key (snake_case) | Type | Notes |
+|----------------------------|---------------------|------|-------|
+| `Company Name` | `company_name` | text | Display name |
+| `Signal Type` | `signal_type` | text | `Job Change`, `M&A Activity`, `Brand Strategy Intent`, `Website Visitor`, `News/Press`, `Rebrand` |
+| `Signal Details` | `signal_details` | text | What triggered the signal |
+| `Contact Info` | `contact_info` | text | Freeform multi-line block: name, title, email, LinkedIn URL. Parsed client-side by `parseContactInfo()` |
+| `Company Revenue` | `company_revenue` | number | Annual revenue in USD (formatted as `$250M` or `$1.2B` in the UI) |
+| `Company Funding Stage` | `company_funding_stage` | text | e.g. `Series A`, `Series B` |
+| `Industry` | `industry` | text | Company's primary industry |
+| `Date Detected` | `date_detected` | date | YYYY-MM-DD, Eastern Time |
+| `Priority` | `priority` | text | `HIGH`, `MEDIUM`, `LOW` |
+| `Brief` | `brief` | text | Claude-generated explanation of why it matters to Starfish |
+| `Contact Approach` | `contact_approach` | text | Claude-generated suggested outreach strategy |
+| `Source URL` | `source_url` | text | Link to article, LinkedIn, or press release |
+| `Status` | `status` | text | `New`, `In Progress`, `Contacted`, `Won`, `Not a Fit`. Default: `New` ← **dashboard writes this** |
+| `HubSpot Pushed` | `hubspot_pushed` | boolean | Default: `false` ← **dashboard writes this after successful push** |
+| `Send Day` | `send_day` | number | BSI signals only: 1–5 (which day of the broadcast sequence this contact is scheduled for) |
+| `Created At` | `created_at` | datetime | Auto-set by Airtable |
+| (record ID) | `id` | string | Airtable record ID (e.g. `recXXXXXXXXXXX`) — used as the signal ID in all API routes |
+
+### BSI Broadcast Contacts — Architecture Note
+
+BSI (Brand Strategy Intent) signals do NOT store contacts as a JSON array field. Instead, each BSI contact gets its own **separate Airtable record** with its own `Send Day` (1–5). When `GET /api/signals/:id` is called for a BSI record, the server calls `getBSIBroadcastContacts(companyName)` which fetches all sibling BSI records for the same company and returns them as `bsi_contacts: [{ id, send_day, name, title, email, linkedin }]`. The `contact_info` freeform text is parsed by `parseContactInfo()` server-side to extract these structured fields.
+
+### Supabase (Auth only)
+
+Supabase is used **exclusively for authentication**. No signal data is stored in Supabase.
+
+| What | Detail |
+|------|--------|
+| Project | `ajqhtmksrmbaxdklawrm.supabase.co` |
+| Auth users | david@starfishco.com, zack@starfishco.com, carly@starfishco.com |
+| Auth method | `signInWithPassword()` — email + password |
+| Session storage | localStorage (handled automatically by `@supabase/supabase-js`) |
+| Frontend client | Anon key only (`VITE_SUPABASE_ANON_KEY`) |
+| Server client | NOT used — Express uses Airtable SDK, not Supabase service role |
+
+---
+
+## 6. API Routes (Express Backend)
+
+All routes use Airtable as the data source via `server/lib/airtable.js`.
+
+### `GET /api/signals`
+Returns all signals sorted by `Date Detected` descending. Response: `{ signals: [...] }`.
+Each signal is mapped from Airtable Title Case fields to snake_case JS keys by `mapRecord()`.
+
+### `GET /api/signals/:id`
+Returns a single signal by Airtable record ID. Response: `{ signal: { ...fields, bsi_contacts: [...] } }`.
+For BSI signals, automatically fetches and attaches all sibling BSI contact records as `bsi_contacts`.
+Returns 404 if Airtable throws a "Record not found" error.
+
+### `PATCH /api/signals/:id/status`
+Body: `{ status: "In Progress" }` — validates against 5 allowed values (`New`, `In Progress`, `Contacted`, `Won`, `Not a Fit`), calls `airtable.update(id, { Status: status })`, returns `{ success: true }`.
+
+### `POST /api/signals/:id/push-to-hubspot`
+- Fetches full signal from Airtable via `getSignalById(id)`
+- Guards against double-push: if `hubspot_pushed === true`, returns 409
+- Parses email from `contact_info` freeform text using `parseContact()` — returns 422 if no email found
+- Calls HubSpot `POST https://api.hubapi.com/crm/v3/objects/contacts` with Bearer token
+- On HubSpot 200 or 201: calls `updateHubspotPushed(id)` → sets `HubSpot Pushed = true` in Airtable → returns `{ message: "...", hubspot_id: "..." }` with status 201
+- On HubSpot 409 (contact already exists): still marks pushed in Airtable, returns 200
+- On HubSpot other error: returns that error status, does NOT mark pushed
+- Requires `HUBSPOT_TOKEN` env var on server — returns 500 if missing
+
+---
+
+## 7. Dashboard Environment Variables
+
+### Frontend (`starfish-dashboard/.env`)
+```
+VITE_SUPABASE_URL=https://ajqhtmksrmbaxdklawrm.supabase.co
+VITE_SUPABASE_ANON_KEY=sb_publishable_...
+VITE_API_URL=http://localhost:4000
+```
+
+### Backend (`starfish-dashboard/server/.env`)
+```
+AIRTABLE_API_KEY=your_airtable_personal_access_token
+AIRTABLE_BASE_ID=appqr1HuoCv37loST
+AIRTABLE_TABLE_NAME=tblYDV2IQ6dsPnmfI
+HUBSPOT_TOKEN=your_hubspot_private_app_token
+PORT=4000
+```
+
+**Note:** `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are NOT needed on the Express server — the server talks to Airtable, not Supabase. Supabase credentials only live in the frontend `.env` for Auth.
+
+**Rules:**
+- `VITE_SUPABASE_ANON_KEY` — safe for frontend (public/publishable key for Auth only)
+- `AIRTABLE_API_KEY` — NEVER in frontend. Server only.
+- `HUBSPOT_TOKEN` — NEVER in frontend. Server only.
+- All `VITE_` prefixed vars are bundled into the browser build — never put secrets there.
+
+---
+
+## 8. Dashboard Definition of Done
+
+The MVP is complete when ALL of the following are true:
+
+**Login**
+- [ ] Email + password login works with a real Supabase user account
+- [ ] Invalid credentials show inline error
+- [ ] Session persists across page refresh
+- [ ] Unauthenticated access to `/signals` redirects to `/login`
+
+**Signals Table**
+- [ ] All signals load from database on page mount
+- [ ] Company Name, Signal Type badge, Priority badge, Contact Name + Title, Date Detected, Status chip, HubSpot button all display correctly
+- [ ] Signal type badges are color-coded by type
+- [ ] Priority badges show 🔴 HIGH, 🟡 MEDIUM, ⚪ LOW with correct colors
+- [ ] Filter by Signal Type works (multi-select, client-side)
+- [ ] Filter by Priority works (multi-select, client-side)
+- [ ] Sort by Date Detected works (newest first by default)
+- [ ] Sort by Priority works (HIGH → MEDIUM → LOW)
+- [ ] Clicking a row navigates to `/signals/:id`
+- [ ] Loading state shows skeleton rows
+- [ ] Empty state shows "No signals found for the selected filters."
+
+**Stats Bar**
+- [ ] Shows today's total, HIGH, MEDIUM, LOW counts
+- [ ] "Today" based on `date_detected` matching today in Eastern Time
+- [ ] Stats reflect full today dataset regardless of active filters
+
+**Signal Detail View**
+- [ ] All fields display correctly
+- [ ] Email is a clickable `mailto:` link
+- [ ] LinkedIn URL opens in new tab
+- [ ] Source URL opens in new tab as "View Source →"
+- [ ] BSI signals show broadcast contacts table with Send Day column
+- [ ] Non-BSI signals do not show the broadcast contacts section
+- [ ] Back button returns to `/signals`
+
+**Status Management**
+- [ ] Status dropdown works on table view and detail view
+- [ ] Changing status calls API and saves instantly (optimistic update)
+- [ ] "Saved ✓" confirmation appears for 2 seconds
+- [ ] On failure: reverts to previous value + shows error
+
+**HubSpot Push**
+- [ ] "Push to HubSpot" button on table and detail view
+- [ ] Shows "Pushing..." and disables during call
+- [ ] On success: "Pushed to HubSpot ✓", permanently grayed out
+- [ ] On failure: inline error, button re-enables
+- [ ] Signals with `hubspot_pushed = true` load with button already grayed out
+- [ ] Same signal cannot be pushed twice
+
+**Design**
+- [ ] All Starfish brand hex codes used as specified in `instructions.md` Part 2
+- [ ] Inter font for UI, JetBrains Mono for data values
+- [ ] Page background `#f5f7f8`, cards/rows `#ffffff`, nav `#004b5c`
+- [ ] No console errors in browser
+- [ ] Responsive down to 1024px minimum
+
+**Deployment**
+- [ ] Frontend deployed to Vercel
+- [ ] Backend running on Railway
+- [ ] All env vars set in Vercel and Railway dashboards
+- [ ] No secrets committed to GitHub
+
+---
+
+## 9. Dashboard File Structure (as built)
+
+```
+starfish-dashboard/
+├── index.html                          ← Google Fonts: Inter wght@300;400;500;600;700 + JetBrains Mono
+├── src/
+│   ├── pages/
+│   │   ├── Home.jsx                    ← Public landing page (/) — no sidebar
+│   │   ├── Login.jsx                   ← Premium two-column login — no sidebar
+│   │   ├── SignalsTable.jsx            ← Main signals list (/signals) — inside Layout
+│   │   └── SignalDetail.jsx            ← Full detail view (/signals/:id) — inside Layout
+│   ├── components/
+│   │   ├── Layout.jsx                  ← Sidebar shell — wraps all authenticated pages
+│   │   ├── StatsBar.jsx                ← Today's signal counts
+│   │   ├── SignalTypeBadge.jsx         ← Colored chip per signal type
+│   │   ├── PriorityBadge.jsx           ← HIGH/MEDIUM/LOW indicator
+│   │   ├── StatusDropdown.jsx          ← New→In Progress→Contacted→Won→Not a Fit
+│   │   ├── HubSpotButton.jsx           ← Push/Pushing.../Pushed ✓ states
+│   │   ├── FilterBar.jsx               ← Signal type + priority multi-select chips
+│   │   └── ProtectedRoute.jsx          ← Redirects unauthenticated users to /login
+│   ├── lib/
+│   │   ├── supabase.js                 ← Supabase browser client (anon key, Auth only)
+│   │   └── api.js                      ← Axios instance → Express backend
+│   ├── App.jsx                         ← Route definitions
+│   └── main.jsx                        ← Entry point
+├── server/
+│   ├── routes/
+│   │   ├── signals.js                  ← GET/PATCH signal routes → Airtable
+│   │   └── hubspot.js                  ← POST push-to-hubspot → HubSpot API + Airtable
+│   ├── lib/
+│   │   └── airtable.js                 ← Airtable SDK client: mapRecord, getAllSignals, getSignalById, updateSignalStatus, updateHubspotPushed, getBSIBroadcastContacts, parseContactInfo
+│   └── server.js                       ← Express entry point, CORS, routes
+├── .env                                ← VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_API_URL
+├── .env.example
+└── server/.env                         ← AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, HUBSPOT_TOKEN, PORT
+```
+
+---
+
+## 10. New Pages Built (Phases 14b–14d)
+
+### Home.jsx — Landing Page (`/`)
+
+Public-facing marketing page. No auth required. No sidebar.
+
+**Sections (top to bottom):**
+1. **Fixed top nav** (64px, `#004b5c`) — "STARFISH" wordmark + "SIGNAL INTELLIGENCE" subtitle left, "Sign In →" outlined button right. Navigates to `/login`. Stays fixed on scroll.
+2. **Hero** (full viewport height, `#004b5c`) — decorative label with horizontal rules, 56px headline, subheadline, white CTA button → `/login`, three-stat row (6 Signal Sources / 5 AM EST / 6 Signal Types), animated bounce chevron that fades out after 100px scroll.
+3. **Signal Types section** (`#f5f7f8`) — six cards in 3-col grid (desktop) / 2-col (tablet) / 1-col (mobile), each using `<SignalTypeBadge>` with real descriptions of each signal type.
+4. **How It Works section** (`#004b5c`) — four step cards with `→` arrows between them (desktop), stacked vertically on mobile.
+5. **Footer** (`#2d2d2d`) — "STARFISH" wordmark left, copyright right.
+
+**Responsive:** All handled via a single `<style>` tag in the component. No Tailwind.
+
+### Layout.jsx — Sidebar Shell (`src/components/Layout.jsx`)
+
+Wraps all authenticated pages. Renders `<Outlet />` for page content.
+
+- 240px deep teal sidebar (`#004b5c`) — persistent on desktop, slide-in drawer on mobile (< 1024px)
+- Top: "STARFISH" wordmark (18px bold white) + "Signal Dashboard" subtitle
+- Nav link: "Signals" → `/signals` with active state (white text + `#6da3ab` left border + subtle tint)
+- Bottom: logged-in user email (from `supabase.auth.getUser()`) + Sign Out button
+- Sign Out: calls `supabase.auth.signOut()` → redirects to `/login`
+- Mobile (< 1024px): sidebar collapses to fixed 52px top bar with hamburger icon + slide-in drawer
+
+**App.jsx route structure:**
+```
+/ → Home (public, no Layout)
+/login → Login (public, no Layout)
+/signals → ProtectedRoute → Layout → SignalsTable
+/signals/:id → ProtectedRoute → Layout → SignalDetail
+* → redirect to /
+```
+
+### Login.jsx — Premium Two-Column Login
+
+Complete rebuild of the login page.
+
+**Desktop (≥ 1024px): Two columns**
+- Left (40%, `#004b5c`): "STARFISH" wordmark, decorative quote in Inter Light, three stats (500+ Brands, 20+ Years, 6 Sources)
+- Right (60%, `#f5f7f8`): white card (480px max-width, 48px padding, subtle shadow) with greeting "Welcome back.", form fields, Sign In button
+
+**Mobile (< 1024px):** Left column `display: none`. Right column full-width, card fills screen, "STARFISH" wordmark appears above the card.
+
+**Form features:**
+- Email field → pressing Enter moves focus to password (does NOT submit)
+- Password field → pressing Enter submits the form. Eye-toggle SVG button inside the input (position: absolute) to show/hide password text. Input has `padding-right: 44px`.
+- Error mapping: all Supabase error strings mapped to friendly messages — never shown raw
+- Loading spinner: CSS `@keyframes` rotating circle in the button, "Signing in..." text, button disabled
+- Error cleared on keystroke after a failed attempt
+- Already-logged-in `useEffect` → redirects to `/signals` without rendering the form
+
+---
+
+## 11. Supabase Users
+
+Three user accounts exist in Supabase Auth for dashboard access:
+
+| Name | Email | Notes |
+|------|-------|-------|
+| David Kessler | david@starfishco.com | Co-founder — reviews signals |
+| Zack Kessler | zack@starfishco.com | Co-founder — reviews signals |
+| Carly Cygielman | carly@starfishco.com | Primary user — daily outreach |
+
+**To send a password reset:** Supabase Dashboard → Authentication → Users → click the user row → "Send password recovery email". Each user should set their own password before first login.

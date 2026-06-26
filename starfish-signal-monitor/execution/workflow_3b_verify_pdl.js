@@ -18,6 +18,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendMessage, sendSignalForVerification, pollVerificationResults } from './utils/telegram_client.js';
 
+// Escape special HTML characters so company/person names don't break Telegram's HTML parser
+const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 // State file written before the 1-hour blocking poll so that a pipeline restart
 // mid-poll leaves a visible trace, and the next run can warn the operator.
 const POLL_STATE_FILE = path.resolve(
@@ -39,7 +42,7 @@ async function verifyPDLSignals(deduplicatedSignals) {
           `⚠️ <b>PDL poll interrupted</b>\n\n` +
           `A previous verification poll was cut short (pipeline restart?) ${ageMin} min ago.\n` +
           `${stale.signalCount} signal(s) were auto-approved without review:\n` +
-          stale.signalNames.map(n => `• ${n}`).join('\n')
+          stale.signalNames.map(n => `• ${esc(n)}`).join('\n')
         );
       }
       fs.unlinkSync(POLL_STATE_FILE);

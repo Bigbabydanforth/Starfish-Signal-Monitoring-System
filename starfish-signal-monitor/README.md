@@ -1,6 +1,6 @@
 # Starfish Signal Monitor
 
-Automated daily intent signal monitoring system for Starfish Co. Monitors five external data sources for companies showing intent signals that indicate they might need branding or marketing services. Runs automatically every day at 5:00 AM EST.
+Automated daily intent signal monitoring system for Starfish Co. Monitors six external data sources for companies showing intent signals that indicate they might need branding or marketing services. Runs automatically every day at 5:00 AM EST.
 
 ---
 
@@ -39,7 +39,7 @@ Seven sequential workflows run each morning:
 
 ---
 
-## Signal Sources (5 APIs)
+## Signal Sources (6 APIs)
 
 | Source | Type | API | Reliability |
 |--------|------|-----|-------------|
@@ -48,6 +48,7 @@ Seven sequential workflows run each morning:
 | MediaStack | News/press monitoring | `GET /v1/news` (HTTPS) | Medium -- requires company name extraction |
 | PredictLeads | M&A + Rebrand event tracking | `GET /v3/discover/news_events` | High -- paginated (up to 450 events), ML fix confirmed |
 | NewsAPI | M&A + funding + job change press releases | `GET /v2/everything` | High -- legal language queries + wire service whitelist |
+| AudienceLab | Website Visitor + Brand Strategy Intent | Pixel + Leads segments, cursor-based pagination (1,000/run) | High -- pre-filtered segments, strict 3-gate timestamp validation |
 
 ---
 
@@ -113,9 +114,9 @@ starfish-signal-monitor/
 │   └── workflow_6_telegram_monitoring.md
 ├── execution/                            # Workflow implementations
 │   ├── main.js                           # Orchestrator + cron + health check server
-│   ├── workflow_1_fetch_signals.js       # Fetches from all 5 sources
+│   ├── workflow_1_fetch_signals.js       # Fetches from all 6 sources
 │   ├── workflow_2_filter_signals.js      # Filters + Claude enrichment
-│   ├── workflow_3_deduplicate.js         # Deduplicates against last 30 days
+│   ├── workflow_3_deduplicate.js         # Deduplicates against last 90 days (IS_AFTER uses 91 days — exclusive comparison)
 │   ├── workflow_3b_verify_pdl.js         # Telegram PDL verification (manual approve/drop)
 │   ├── workflow_4_save_to_airtable.js    # Batch-inserts to Airtable + email finder
 │   ├── workflow_4b_sync_sheets.js        # Syncs verified signals to Google Sheets
@@ -125,16 +126,9 @@ starfish-signal-monitor/
 │   ├── test_apollo.js                   # Standalone test: Apollo fetch only
 │   ├── enrich_airtable.js               # Manual Claude enrichment for existing records
 │   ├── claude_enrich_airtable.js        # Claude enrichment utility
-│   ├── backfill_names.js                # One-time Hunter+Apollo name backfill
-│   ├── backfill_to_sheets.js            # One-time Sheets backfill
-│   ├── add_missing_to_sheets.js         # Add missing records to Sheets
-│   ├── check_contacts.js               # Audit tool: prints all Contact Info fields
-│   ├── send_batch_1.js                  # Sends rows 20-35 to testing email for review
-│   ├── send_batch_2.js                  # Sends rows 36-52 to testing email for review
-│   ├── send_batch_2_starfish.js         # Sends rows 36-52 to Starfish (production)
-│   ├── send_batch_email.js              # Generic batch email sender
-│   ├── verify_first72.js               # Verify first 72 records
-│   ├── test_pattern_email.js            # Test email pattern detection
+│   ├── send_missing_to_starfish.js      # Send Airtable records not yet in Sheets → writes rows + emails Starfish (1 card/company)
+│   ├── backfill_to_sheets.js            # One-time: rewrite all Sheets rows from Airtable (supports --dry-run, --date flags)
+│   ├── get_refresh_token.js             # One-time: regenerate Google OAuth refresh token when it expires
 │   └── utils/
 │       ├── api_clients.js               # Apollo, PDL, MediaStack, PredictLeads, NewsAPI
 │       ├── claude_client.js             # Claude API enrichment (Anthropic SDK)
@@ -327,6 +321,9 @@ Each pipeline run generates dated files in `.tmp/`:
 - **Date timezone fix** — `getDateDaysAgo()` now anchors to Eastern "today" before arithmetic, preventing UTC/Eastern off-by-one between midnight and ~5 AM UTC.
 - **Puppeteer dead-slot fix** — `_releaseSlot` re-queues the next waiter instead of silently discarding it when task setup fails.
 - **Sheets row fix** — Replaced manual column-A counting + `values.update()` with `values.append()`, immune to blank column A gaps.
+- **`send_missing_to_starfish.js`** — One-time utility to find all Airtable records not yet in Google Sheets, append them (test run only), and email Starfish one card per company (BSI multi-contact companies show contact count). Skips Sheets write on `NODE_ENV=production` to avoid double-writing.
+- **`backfill_to_sheets.js`** — One-time utility to rewrite all Sheets rows from Airtable from scratch. Supports `--dry-run` and `--date` flags. Use when Sheet is out of sync after bulk Airtable imports.
+- **`get_refresh_token.js`** — One-time utility to regenerate a Google OAuth2 refresh token when the existing one expires (`invalid_grant` error). Runs a local server on port 3000 to catch the OAuth redirect.
 
 ---
 

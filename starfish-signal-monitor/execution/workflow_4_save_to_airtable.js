@@ -1,3 +1,25 @@
+/*
+ * EMAIL VERIFICATION UPGRADE — June 2026
+ *
+ * All email assignment now routes through verifyEmail(email, source, apolloStatus)
+ * from utils/email_validator.js. Returns { valid, flagged, reason }.
+ *
+ * Sources and fail policy:
+ *   'apollo'    → Layer 1 is Apollo email_status (free). 'verified'/'likely_to_engage'
+ *                 → accept immediately. 'risky' → run Hunter verifier. Otherwise discard.
+ *   'hunter'    → Always run Hunter verifier. Unavailable → accept flagged (fail open).
+ *   'puppeteer' → Always run Hunter verifier. Unavailable → discard (fail closed).
+ *
+ * Flagged emails (valid but risky): stored with email_flagged / _email_flagged = true
+ * so formatContactInfo() can append [unverified] to the Airtable Contact Info field.
+ *
+ * BSI T1 (AudienceLab identity-resolved contacts): isFakeEmail() only — no verifyEmail().
+ * BSI T2 / T3 contacts that fail verification: skipped (reachability filter drops
+ * contacts with no email AND no LinkedIn — preserving LinkedIn-only contacts).
+ *
+ * circuit_breaker.js — no changes. Hunter verifier calls are protected inside verifyEmail().
+ */
+
 import 'dotenv/config';
 import fs from 'fs';
 import axios from 'axios';
@@ -11,141 +33,13 @@ import { formatRevenue, formatNumber } from './utils/text_parsing.js';
 import { sendErrorAlert } from './utils/telegram_client.js';
 import { findEmailWithPuppeteer, findCompanyDomain, findEmailPatternViaGoogle } from './utils/puppeteer_email_finder.js';
 import { getKnownDomain } from './utils/known_domains.js';
-import { isFakeEmail } from './utils/email_validator.js';
+import { isFakeEmail, verifyEmail } from './utils/email_validator.js';
 import { getBreaker } from './utils/circuit_breaker.js';
+import { extractDomain, findEmailWithApollo, findEmailWithHunterPerson, findEmailWithHunterDomain } from './utils/email_enrichment.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TMP_DIR = resolve(__dirname, '../.tmp');
-
-// ── Apollo email reveal — try to get a real work email before falling back to Puppeteer
-// Uses /people/match with the person's LinkedIn URL. Never throws — returns null on failure.
-async function findEmailWithApollo(signal) {
-  if (signal.type !== 'Job Change' && signal.type !== 'Website Visitor') return null;
-  const linkedinUrl = signal.person?.linkedin_url;
-  const personName  = `${signal.person?.first_name || ''} ${signal.person?.last_name || ''}`.trim() || signal.company.name;
-  if (!linkedinUrl) {
-    console.log(`  [Apollo] ⏭️  Skipping ${personName} — no LinkedIn URL`);
-    return null;
-  }
-
-  if (getBreaker('apollo').isOpen()) {
-    console.log(`  [Apollo] ⚡ Circuit open — skipping ${personName}`);
-    return null;
-  }
-  try {
-    const baseUrl = process.env.APOLLO_API_URL || 'https://api.apollo.io/v1';
-    const res = await axios.post(`${baseUrl}/people/match`, {
-      linkedin_url:            linkedinUrl,
-      reveal_personal_emails:  false
-    }, {
-      headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Content-Type': 'application/json' },
-      timeout: 15000
-    });
-    getBreaker('apollo').recordSuccess();
-    const email = res.data?.person?.email || null;
-    if (email) {
-      console.log(`  [Apollo] ✅ ${personName} → ${email}`);
-    } else {
-      console.log(`  [Apollo] ℹ️  No email returned for ${personName} — trying Hunter...`);
-    }
-    return email;
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 401)      console.warn(`  [Apollo] ❌ Unauthorized (401) — check APOLLO_API_KEY`);
-    else if (status === 429) console.warn(`  [Apollo] ⏳ Rate limited (429) for ${personName}`);
-    else if (status === 422) console.warn(`  [Apollo] ℹ️  422 Unprocessable for ${personName} — person not in Apollo database`);
-    // 422 is a normal "not found" response, NOT an outage — do not trip the circuit
-    else {
-      console.warn(`  [Apollo] ⚠️  Error for ${personName}: ${err.message}`);
-      getBreaker('apollo').recordFailure(err.message);
-    }
-    return null;
-  }
-}
-
-// ── Extract bare domain from a website URL (e.g. "https://www.acme.com/foo" → "acme.com") ──
-function extractDomain(website) {
-  if (!website) return null;
-  return website.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '').toLowerCase() || null;
-}
-
-// ── Hunter email-finder — for Job Change signals (specific person lookup) ─────────
-// Requires first name, last name, and a domain. Only trusts results with score ≥ 70.
-// Never throws — returns null on failure.
-async function findEmailWithHunterPerson(signal) {
-  if (signal.type !== 'Job Change') return null;
-  if (!process.env.HUNTER_API_KEY) return null;
-
-  const firstName = signal.person?.first_name;
-  const lastName  = signal.person?.last_name;
-  const domain    = extractDomain(signal.company?.website);
-
-  if (!firstName || !lastName || !domain) return null;
-
-  if (getBreaker('hunter').isOpen()) {
-    console.log(`  [Hunter] ⚡ Circuit open — skipping ${firstName} ${lastName}`);
-    return null;
-  }
-  try {
-    const res = await axios.get('https://api.hunter.io/v2/email-finder', {
-      params: { domain, first_name: firstName, last_name: lastName, api_key: process.env.HUNTER_API_KEY },
-      timeout: 15000
-    });
-    getBreaker('hunter').recordSuccess();
-    const { email, score } = res.data?.data || {};
-    if (email && score >= 70) {
-      console.log(`  [Hunter] ✅ ${firstName} ${lastName} → ${email} (score ${score})`);
-      return email;
-    }
-    if (email) {
-      console.log(`  [Hunter] ⚠️  ${firstName} ${lastName} → ${email} rejected (score ${score} < 70)`);
-    } else {
-      console.log(`  [Hunter] ℹ️  No email found for ${firstName} ${lastName} at ${domain}`);
-    }
-    return null;
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 401)      console.warn(`  [Hunter] ❌ Unauthorized (401) — check HUNTER_API_KEY`);
-    else if (status === 429) console.warn(`  [Hunter] ⏳ Rate limited (429) at ${domain}`);
-    else {
-      console.warn(`  [Hunter] ⚠️  Error for ${firstName} ${lastName}: ${err.message}`);
-      getBreaker('hunter').recordFailure(err.message);
-    }
-    return null;
-  }
-}
-
-// ── Hunter domain-search — for News/Press & M&A signals (find marketing exec) ────
-// Returns the best marketing/exec email found at the company's domain, or null.
-// Never throws — returns null on failure.
-// Title keywords for BSI domain-search — marketing/brand ONLY.
-// No CEO/CFO/COO — for BSI we need the person who owns the brand budget.
-const HUNTER_BSI_TITLE_KEYWORDS = [
-  'cmo', 'chief marketing', 'chief brand',
-  'vp marketing', 'vp of marketing', 'vp brand', 'vp of brand',
-  'svp marketing', 'svp brand', 'evp marketing', 'evp brand',
-  'vice president marketing', 'vice president brand', 'vice president of marketing', 'vice president of brand',
-  'senior vice president marketing', 'senior vice president brand',
-  'executive vice president marketing', 'executive vice president brand',
-  'head of marketing', 'head of brand',
-  'director of marketing', 'marketing director', 'director of brand', 'brand director',
-  'director of brand marketing', 'brand officer'
-];
-const HUNTER_BSI_DEPT_KEYWORDS = ['marketing', 'brand'];
-
-// Title keywords for News/Press & M&A domain-search — marketing/brand + senior decision-makers.
-// Deliberately excludes CFO, CIO, CTO, CHRO — Starfish sells branding/marketing services,
-// so those roles have no budget or mandate for brand work.
-const HUNTER_EXEC_TITLE_KEYWORDS = [
-  ...HUNTER_BSI_TITLE_KEYWORDS,
-  'ceo', 'chief executive',
-  'coo', 'chief operating',
-  'cro', 'chief revenue',
-  'president',
-  'managing partner', 'managing director', 'partner'
-];
-const HUNTER_EXEC_DEPT_KEYWORDS = ['marketing', 'brand', 'executive'];
 
 // ── BSI strict title allowlist ────────────────────────────────────────────────
 // Only contacts matching these roles are allowed into Airtable for BSI signals.
@@ -215,72 +109,6 @@ function assignSendDay(title) {
   return 5;
 }
 
-async function findEmailWithHunterDomain(signal) {
-  if (signal.type === 'Job Change') return null;
-  if (!process.env.HUNTER_API_KEY) return null;
-
-  const domain = extractDomain(signal.company?.website);
-  if (!domain) return null;
-
-  // BSI signals use stricter marketing-only title filter to avoid finance/ops/IT contacts
-  const isBSI       = signal.type === 'Brand Strategy Intent';
-  const titleKws    = isBSI ? HUNTER_BSI_TITLE_KEYWORDS    : HUNTER_EXEC_TITLE_KEYWORDS;
-  const deptKws     = isBSI ? HUNTER_BSI_DEPT_KEYWORDS     : HUNTER_EXEC_DEPT_KEYWORDS;
-
-  if (getBreaker('hunter').isOpen()) {
-    console.log(`  [Hunter/domain] ⚡ Circuit open — skipping ${domain}`);
-    return null;
-  }
-  try {
-    const res = await axios.get('https://api.hunter.io/v2/domain-search', {
-      params: { domain, api_key: process.env.HUNTER_API_KEY },
-      timeout: 15000
-    });
-    getBreaker('hunter').recordSuccess();
-
-    const data    = res.data?.data || {};
-    const emails  = data.emails    || [];
-    const pattern = data.pattern   || null;
-
-    const isExec = (e) => {
-      const pos  = (e.position   || '').toLowerCase();
-      const dept = (e.department || '').toLowerCase();
-      return titleKws.some(k => pos.includes(k)) ||
-             deptKws.some(k => dept.includes(k));
-    };
-
-    const execEmails = emails.filter(e => isExec(e));
-    const pick = execEmails[0] || null;  // Never fall back to non-exec contacts
-    const name  = pick ? `${pick.first_name || ''} ${pick.last_name || ''}`.trim() : null;
-    const title = pick?.position || null;
-
-    if (pick?.value) {
-      console.log(`  [Hunter] ✅ ${signal.company.name} → ${pick.value}${title ? ` (${title})` : ''}`);
-    } else if (isBSI) {
-      console.log(`  [Hunter/BSI] ⚠️  No marketing exec found at ${domain} — skipping non-marketing contacts`);
-    } else {
-      console.log(`  [Hunter] ℹ️  No exec email found at ${domain}${pattern ? ` (pattern: "${pattern}" saved for next step)` : ''}`);
-    }
-
-    return {
-      email:     pick?.value     || null,
-      name,
-      title,
-      firstName: pick?.first_name || null,
-      lastName:  pick?.last_name  || null,
-      pattern
-    };
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 429) console.warn(`  [Hunter/domain] ⏳ Rate limited (429) at ${domain}`);
-    else {
-      console.warn(`  [Hunter/domain] ⚠️  Error at ${domain}: ${err.message}`);
-      getBreaker('hunter').recordFailure(err.message);
-    }
-    return null;
-  }
-}
-
 // ── Apollo broadcast search — find up to 5 contacts across all exec + marketing + comms roles ──
 // Used exclusively for BSI signals. Returns an array of contact objects (never throws).
 async function apolloBroadcastSearch(domain) {
@@ -292,8 +120,10 @@ async function apolloBroadcastSearch(domain) {
 
   const baseUrl = process.env.APOLLO_API_URL || 'https://api.apollo.io/v1';
   const body = {
-    // /mixed_people/search uses unprefixed params (person_titles, organization_domains)
-    person_titles: [
+    // Apollo API uses q_-prefixed params for filtering (q_organization_domains, q_person_titles).
+    // organization_domains (unprefixed) is silently ignored — causes same contacts to appear
+    // for every domain as Apollo returns global top-matches instead of company-specific results.
+    q_person_titles: [
       // C-Suite
       'CEO', 'Chief Executive Officer',
       'COO', 'Chief Operating Officer',
@@ -311,7 +141,7 @@ async function apolloBroadcastSearch(domain) {
       'Head of Communications', 'Director of Communications',
       'Chief Communications Officer'
     ],
-    organization_domains: [domain],
+    q_organization_domains: domain,
     per_page: 5,
     page: 1
   };
@@ -321,20 +151,40 @@ async function apolloBroadcastSearch(domain) {
   const RETRY_DELAYS = [15000, 30000];
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await axios.post(`${baseUrl}/mixed_people/search`, body, {
+      const res = await axios.post(`${baseUrl}/mixed_people/api_search`, body, {
         headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Content-Type': 'application/json' },
         timeout: 15000
       });
       getBreaker('apollo').recordSuccess();
       const people = res.data?.people || [];
       console.log(`  [Apollo/Broadcast] ${people.length} contacts found at ${domain}`);
-      return people.map(p => ({
-        firstName:    p.first_name   || '',
-        lastName:     p.last_name    || '',
-        title:        p.title        || null,
-        linkedin_url: p.linkedin_url || null,
-        email:        p.email        || null   // capture if Apollo returns it (plan-dependent)
-      }));
+
+      // Apollo's search results hide last_name, email, and linkedin_url at the plan level.
+      // Enrich each contact via /people/{id} to reveal the full profile.
+      // Skip enrichment if the search already returned last_name + linkedin_url (paid plan may include them).
+      const enriched = [];
+      for (const p of people) {
+        let full = p;
+        if (p.id && (!p.last_name || !p.linkedin_url)) {
+          try {
+            const enrichRes = await axios.get(`${baseUrl}/people/${p.id}`, {
+              headers: { 'X-Api-Key': process.env.APOLLO_API_KEY },
+              timeout: 15000
+            });
+            full = enrichRes.data?.person || p;
+          } catch (enrichErr) {
+            console.warn(`  [Apollo/BSI] Enrichment failed for person ${p.id} — using raw search data: ${enrichErr.message}`);
+          }
+        }
+        enriched.push({
+          firstName:    full.first_name   || p.first_name   || '',
+          lastName:     full.last_name    || p.last_name    || '',
+          title:        full.title        || p.title        || null,
+          linkedin_url: full.linkedin_url || p.linkedin_url || null,
+          email:        full.email        || p.email        || null
+        });
+      }
+      return enriched;
     } catch (err) {
       const status = err.response?.status;
       if (status === 429 && attempt < 3) {
@@ -407,44 +257,9 @@ function applyHunterPattern(pattern, firstName, lastName, domain) {
   return `${local}@${domain}`;
 }
 
-// ── Hunter email verifier ──────────────────────────────────────────────────────
-// Module-level flag — once Hunter quota is confirmed exhausted, skip all further
-// verification calls rather than wasting requests that will all return 402.
-let hunterQuotaExhausted = false;
-
-async function verifyEmailWithHunter(email) {
-  if (!process.env.HUNTER_API_KEY || !email) return false;
-  if (hunterQuotaExhausted) return false; // skip — already confirmed exhausted this run
-  if (getBreaker('hunter').isOpen()) {
-    console.log(`  [Hunter/verify] ⚡ Circuit open — skipping verification for ${email}`);
-    return false;
-  }
-  try {
-    const res = await axios.get('https://api.hunter.io/v2/email-verifier', {
-      params: { email, api_key: process.env.HUNTER_API_KEY },
-      timeout: 15000
-    });
-    getBreaker('hunter').recordSuccess();
-    const status = res.data?.data?.status;
-    return status === 'valid' || status === 'accept_all';
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 402) {
-      if (!hunterQuotaExhausted) {
-        // Guard: only alert once. In a concurrent context two signals can both receive 402
-        // before either catch block runs — this ensures only the first one fires the alert.
-        hunterQuotaExhausted = true;
-        console.error('[Hunter] ❌ Quota exhausted (402) — email verification disabled for this run. Top up credits at hunter.io.');
-        sendErrorAlert('⚠️ Hunter.io quota exhausted (402) — email verification is disabled for today\'s run. Pattern-constructed emails will not be verified. Top up credits at hunter.io.').catch(() => {});
-      }
-    } else if (status === 401) {
-      console.error('[Hunter] ❌ Unauthorized (401) — check HUNTER_API_KEY');
-    } else {
-      getBreaker('hunter').recordFailure(err.message);
-    }
-    return false;
-  }
-}
+// verifyEmailWithHunter removed — replaced by verifyEmail() imported from utils/email_validator.js.
+// verifyEmail() adds Apollo email_status as a free Layer 1 gate and returns null (instead of false)
+// when Hunter is unavailable, so callers can choose fail-open vs fail-closed per context.
 
 
 // ── Apollo people search — find an exec by domain ─────────────────────────────
@@ -476,19 +291,31 @@ async function apolloFindExec(domain, signalType) {
           'Head of Marketing', 'Head of Brand',
           'Director of Marketing', 'Marketing Director'
         ];
-    const res = await axios.post(`${baseUrl}/mixed_people/search`, {
-      person_titles:        titles,
-      organization_domains: [domain],
-      per_page:             1
+    const res = await axios.post(`${baseUrl}/mixed_people/api_search`, {
+      q_person_titles:        titles,
+      q_organization_domains: domain,
+      per_page:               1
     }, {
       headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Content-Type': 'application/json' },
       timeout: 15000
     });
     getBreaker('apollo').recordSuccess();
-    const p = res.data?.people?.[0];
-    if (p?.first_name) return { firstName: p.first_name, lastName: p.last_name || '', title: p.title || null };
-    console.log(`  [Apollo/exec] ℹ️  No results for ${domain} (${signalType})`);
-    return null;
+    let p = res.data?.people?.[0];
+    if (!p?.first_name) {
+      console.log(`  [Apollo/exec] ℹ️  No results for ${domain} (${signalType})`);
+      return null;
+    }
+    // Enrich to get last_name if search result didn't include it
+    if (p.id && !p.last_name) {
+      try {
+        const enrichRes = await axios.get(`${baseUrl}/people/${p.id}`, {
+          headers: { 'X-Api-Key': process.env.APOLLO_API_KEY },
+          timeout: 15000
+        });
+        p = enrichRes.data?.person || p;
+      } catch (enrichErr) { console.warn(`  [Apollo/exec] Enrichment failed for person ${p.id} — using raw search data: ${enrichErr.message}`); }
+    }
+    return { firstName: p.first_name, lastName: p.last_name || '', title: p.title || null };
   } catch (err) {
     const status = err.response?.status;
     if (status === 401)      console.warn(`  [Apollo/exec] ❌ Unauthorized (401) — check APOLLO_API_KEY`);
@@ -578,15 +405,26 @@ function formatSignalDetails(signal) {
   return details.length > 2000 ? details.substring(0, 1997) + '...' : details;
 }
 
+// Maps a stored verification result to the Airtable "Email Verified" single-select field.
+function getEmailVerifiedStatus(verification) {
+  if (!verification) return 'Unverified';
+  if (verification.reason === 'apollo_verified') return 'Verified';
+  if (verification.reason === 'apollo_likely')   return 'Likely';
+  if (verification.flagged === true)             return 'Risky (Flagged)';
+  if (verification.valid   === true)             return 'Verified';
+  return 'Unverified';
+}
+
 // ── Format a single BSI broadcast contact for the Airtable Contact Info field ──
 function formatBSIContactInfo(contact, companyWebsite) {
   const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim();
   let info = '';
   if (name)               info += `Name: ${name}`;
   if (contact.title)      info += `\nTitle: ${contact.title}`;
-  if (contact.email)      info += `\nEmail: ${contact.email}`;
+  if (contact.email)      info += `\nEmail: ${contact.email}${contact.email_flagged ? ' [unverified]' : ''}`;
   if (contact.linkedin_url) info += `\nLinkedIn: ${contact.linkedin_url}`;
   if (!contact.email && !contact.linkedin_url && companyWebsite) info += `\nWebsite: ${companyWebsite}`;
+  if (contact.email_flagged) info += `\nEmail flagged as risky — verify before sending`;
   return info.length > 500 ? info.substring(0, 497) + '...' : info || 'Contact info not available';
 }
 
@@ -597,8 +435,9 @@ function formatContactInfo(signal) {
     const name = `${signal.person.first_name || ''} ${signal.person.last_name || ''}`.trim();
     info = `Name: ${name}\nTitle: ${signal.person.title || 'Unknown'}`;
     if (signal.person.linkedin_url)  info += `\nLinkedIn: ${signal.person.linkedin_url}`;
-    if (signal.person.email)         info += `\nEmail: ${signal.person.email}`;
-    else if (signal._puppeteer_email) info += `\nEmail: ${signal._puppeteer_email} (via ${signal._puppeteer_source})`;
+    if (signal.person.email)         info += `\nEmail: ${signal.person.email}${signal._email_flagged ? ' [unverified]' : ''}`;
+    else if (signal._puppeteer_email) info += `\nEmail: ${signal._puppeteer_email}${signal._email_flagged ? ' [unverified]' : ''} (via ${signal._puppeteer_source})`;
+    if (signal._email_flagged)       info += `\nEmail flagged as risky — verify before sending`;
     if (signal.person.phone)         info += `\nPhone: ${signal.person.phone}`;
     if (signal.person.department)    info += `\nDept: ${signal.person.department}`;
   } else if (signal.type === 'M&A Activity' && signal.ma_contacts?.length > 0) {
@@ -608,7 +447,7 @@ function formatContactInfo(signal) {
     let total = 0;
     for (const c of signal.ma_contacts) {
       let line = `${c.name} — ${c.title || 'Unknown Title'}`;
-      if (c.email)        line += ` | ${c.email}`;
+      if (c.email)        line += ` | ${c.email}${c.email_flagged ? ' [unverified]' : ''}`;
       if (c.linkedin_url) line += ` | ${c.linkedin_url}`;
       if (total + line.length + 1 > 490) break; // +1 for \n, leave headroom
       lines.push(line);
@@ -618,7 +457,7 @@ function formatContactInfo(signal) {
   } else {
     // News/Press or M&A with no contacts found
     if (signal._puppeteer_email) {
-      info = `Email: ${signal._puppeteer_email} (via ${signal._puppeteer_source})`;
+      info = `Email: ${signal._puppeteer_email}${signal._email_flagged ? ' [unverified]' : ''} (via ${signal._puppeteer_source})`;
     } else if (signal.company.website) {
       info = `Company Website: ${signal.company.website}`;
     } else {
@@ -678,6 +517,9 @@ function formatForAirtable(signal, bsiContact) {
       'Contact Approach':      signal.contact_approach,
       'Source URL':            signal.source_url || null,
       'Status':                (signal._claude_failed || signal._enrichment_failed) ? 'Needs Review' : 'New',
+      'Email Verified':        (bsiContact && typeof bsiContact === 'object')
+                                 ? getEmailVerifiedStatus(bsiContact.emailVerification)
+                                 : getEmailVerifiedStatus(signal.emailVerification),
       // L1: 'Send Day' is BSI-only (1–5 for broadcast stagger). null for all other signal types is intentional.
       'Send Day':              (bsiContact && typeof bsiContact === 'object') ? (bsiContact.send_day || null) : null
     }
@@ -696,13 +538,16 @@ function expandToRecords(signals) {
         // one signal expanding to 10+ records would overflow a single batch and cause failures.
         const contacts = signal.bsi_contacts.slice(0, 5);
         for (const contact of contacts) {
-          records.push(formatForAirtable(signal, contact));
+          const record = sanitizeAirtableRecord(formatForAirtable(signal, contact));
+          if (record) records.push(record);
         }
       } else {
-        records.push(formatForAirtable(signal, null)); // null = Contact Needed
+        const record = sanitizeAirtableRecord(formatForAirtable(signal, null));
+        if (record) records.push(record);
       }
     } else {
-      records.push(formatForAirtable(signal));
+      const record = sanitizeAirtableRecord(formatForAirtable(signal));
+      if (record) records.push(record);
     }
   }
   return records;
@@ -714,6 +559,35 @@ function chunkArray(array, size) {
     chunks.push(array.slice(i, i + size));
   }
   return chunks;
+}
+
+// Validate and sanitize a record before sending to Airtable.
+// - Drops records missing required fields (returns null — caller skips)
+// - Replaces undefined values with null (Airtable API rejects undefined)
+// - Truncates long-text fields to Airtable's 100,000-char hard limit
+const AIRTABLE_TEXT_LIMIT = 100_000;
+const AIRTABLE_REQUIRED   = ['Company Name', 'Signal Type', 'Date Detected'];
+
+function sanitizeAirtableRecord(record) {
+  const fields = record.fields;
+  for (const key of AIRTABLE_REQUIRED) {
+    if (!fields[key]) {
+      console.warn(`[Airtable/Validation] Dropping record — missing required field: "${key}" (Company: ${fields['Company Name'] || '?'})`);
+      return null;
+    }
+  }
+  const cleaned = {};
+  for (const [key, val] of Object.entries(fields)) {
+    if (val === undefined) {
+      cleaned[key] = null;
+    } else if (typeof val === 'string' && val.length > AIRTABLE_TEXT_LIMIT) {
+      console.warn(`[Airtable/Validation] Field "${key}" truncated (${val.length} → ${AIRTABLE_TEXT_LIMIT}) for: ${fields['Company Name']}`);
+      cleaned[key] = val.slice(0, AIRTABLE_TEXT_LIMIT);
+    } else {
+      cleaned[key] = val;
+    }
+  }
+  return { fields: cleaned };
 }
 
 // --- Main Workflow ---
@@ -829,7 +703,7 @@ async function saveToAirtable(deduplicatedSignals) {
   console.log(`[Airtable] Running email enrichment (Apollo → Hunter → Puppeteer) [concurrency: ${ENRICHMENT_CONCURRENCY}]...`);
 
   async function enrichOneSignal(signal) {
-    console.log(`\n[Enrich] ── ${signal.company.name} (${signal.type}) ──────────────────────`);
+    console.log(`[Email Enrichment] Starting cascade for: ${signal.company.name} (${signal.type})`);
 
     // ── Brand Strategy Intent: 4-Tier Contact Waterfall ──────────────────────
     //
@@ -851,18 +725,18 @@ async function saveToAirtable(deduplicatedSignals) {
       // ── TIER 1: AL sent the right person with a valid email ─────────────────
       // Perfect case — one contact, one record, no APIs needed.
       if (alPerson?.first_name && alTitleIsBrandMarketing) {
-        const alEmail = alPerson.email && !isFakeEmail(alPerson.email) ? alPerson.email : null;
-        if (alEmail) {
+        if (alPerson.email && !isFakeEmail(alPerson.email)) {
+          // T1 AudienceLab contacts are identity-resolved — isFakeEmail() gate only, no Hunter verifier.
           signal.bsi_contacts.push({
             first_name:   alPerson.first_name,
             last_name:    alPerson.last_name  || '',
             title:        alPerson.title,
-            email:        alEmail,
+            email:        alPerson.email,
             linkedin_url: alPerson.linkedin_url || null,
             source:       'audiencelab',
             send_day:     assignSendDay(alPerson.title)
           });
-          console.log(`  [BSI/T1] ✅ AL has right person + email — ${alPerson.first_name} ${alPerson.last_name} (${alPerson.title}) → ${alEmail}`);
+          console.log(`  [BSI/T1] ✅ AL has right person + email — ${alPerson.first_name} ${alPerson.last_name} (${alPerson.title}) → ${alPerson.email}`);
           console.log(`  [BSI] ✅ ${signal.company.name} — Tier 1 complete`);
           return;
         }
@@ -918,16 +792,36 @@ async function saveToAirtable(deduplicatedSignals) {
           getBreaker('hunter').recordSuccess();
           const { email: hEmail, score } = hRes.data?.data || {};
           if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-            signal.bsi_contacts.push({
-              first_name:   alPerson.first_name,
-              last_name:    alPerson.last_name  || '',
-              title:        alPerson.title,
-              email:        hEmail,
-              linkedin_url: alPerson.linkedin_url || null,
-              source:       'audiencelab+hunter',
-              send_day:     assignSendDay(alPerson.title)
-            });
-            console.log(`  [BSI/T2] ✅ Found email for AL contact → ${hEmail} (score ${score})`);
+            const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
+            await new Promise(r => setTimeout(r, 400));
+            if (valid) {
+              if (flagged) console.log(`  [BSI/T2] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+              signal.bsi_contacts.push({
+                first_name:   alPerson.first_name,
+                last_name:    alPerson.last_name  || '',
+                title:        alPerson.title,
+                email:        hEmail,
+                email_flagged:    flagged || undefined,
+                emailVerification: { valid, flagged, reason },
+                linkedin_url: alPerson.linkedin_url || null,
+                source:       'audiencelab+hunter',
+                send_day:     assignSendDay(alPerson.title)
+              });
+              console.log(`  [BSI/T2] ✅ Found email for AL contact → ${hEmail} (score ${score})`);
+            } else {
+              console.log(`  [BSI/T2] ❌ ${hEmail} failed verification (${reason}) — keeping AL contact without email`);
+              if (alPerson.linkedin_url) {
+                signal.bsi_contacts.push({
+                  first_name:   alPerson.first_name,
+                  last_name:    alPerson.last_name  || '',
+                  title:        alPerson.title,
+                  email:        null,
+                  linkedin_url: alPerson.linkedin_url,
+                  source:       'audiencelab',
+                  send_day:     assignSendDay(alPerson.title)
+                });
+              }
+            }
           } else if (alPerson.linkedin_url) {
             // Keep them with LinkedIn only — right person even without email
             signal.bsi_contacts.push({
@@ -969,17 +863,33 @@ async function saveToAirtable(deduplicatedSignals) {
           });
           // Reject contacts with no first name — a generic dept mailbox with no person is useless
           if (bsiMatch && bsiMatch.first_name) {
-            const email = bsiMatch.value && !isFakeEmail(bsiMatch.value) ? bsiMatch.value : null;
+            let bsiMatchEmail = null;
+            let bsiMatchEmailFlagged;
+            let bsiMatchEmailVerification;
+            if (bsiMatch.value && !isFakeEmail(bsiMatch.value)) {
+              const { valid, flagged, reason } = await verifyEmail(bsiMatch.value, 'hunter', null);
+              await new Promise(r => setTimeout(r, 400));
+              if (valid) {
+                bsiMatchEmail             = bsiMatch.value;
+                bsiMatchEmailFlagged      = flagged || undefined;
+                bsiMatchEmailVerification = { valid, flagged, reason };
+                if (flagged) console.log(`  [BSI/T2] ⚠️  ${bsiMatch.value} flagged as risky (${reason}) — saving with [unverified] note`);
+              } else {
+                console.log(`  [BSI/T2] ❌ ${bsiMatch.value} failed verification (${reason})`);
+              }
+            }
             signal.bsi_contacts.push({
-              first_name:   bsiMatch.first_name,
-              last_name:    bsiMatch.last_name  || '',
-              title:        bsiMatch.position   || null,
-              email,
-              linkedin_url: bsiMatch.linkedin   || null,
-              source:       'hunter',
-              send_day:     assignSendDay(bsiMatch.position)
+              first_name:        bsiMatch.first_name,
+              last_name:         bsiMatch.last_name  || '',
+              title:             bsiMatch.position   || null,
+              email:             bsiMatchEmail,
+              email_flagged:     bsiMatchEmailFlagged,
+              emailVerification: bsiMatchEmailVerification,
+              linkedin_url:      bsiMatch.linkedin   || null,
+              source:            'hunter',
+              send_day:          assignSendDay(bsiMatch.position)
             });
-            console.log(`  [BSI/T2] ✅ Hunter found: ${bsiMatch.first_name} ${bsiMatch.last_name} (${bsiMatch.position})${email ? ` → ${email}` : ' — no email'}`);
+            console.log(`  [BSI/T2] ✅ Hunter found: ${bsiMatch.first_name} ${bsiMatch.last_name} (${bsiMatch.position})${bsiMatchEmail ? ` → ${bsiMatchEmail}` : ' — no email'}`);
           } else if (bsiMatch) {
             console.log(`  [BSI/T2] ℹ️  Hunter matched a role at ${bsiDomain} but no person name — skipping (generic mailbox)`);
           } else {
@@ -997,8 +907,8 @@ async function saveToAirtable(deduplicatedSignals) {
       // Step 2.4: Fill email for the Tier 2 contact if they have a name but no email
       const t2Found = signal.bsi_contacts[0];
       if (t2Found && !t2Found.email && t2Found.first_name && bsiDomain) {
-        // Hunter person-finder
-        if (process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen()) {
+        // Hunter person-finder — requires last name, skip if missing to avoid guaranteed 400 errors
+        if (process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen() && t2Found.last_name) {
           try {
             const hRes = await axios.get('https://api.hunter.io/v2/email-finder', {
               params: { domain: bsiDomain, first_name: t2Found.first_name, last_name: t2Found.last_name || '', api_key: process.env.HUNTER_API_KEY },
@@ -1007,8 +917,17 @@ async function saveToAirtable(deduplicatedSignals) {
             getBreaker('hunter').recordSuccess();
             const { email: hEmail, score } = hRes.data?.data || {};
             if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-              t2Found.email = hEmail;
-              console.log(`  [BSI/T2] ✅ Hunter email: ${t2Found.first_name} ${t2Found.last_name} → ${hEmail} (score ${score})`);
+              const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
+              await new Promise(r => setTimeout(r, 400));
+              if (valid) {
+                t2Found.email = hEmail;
+                t2Found.email_flagged    = flagged || undefined;
+                t2Found.emailVerification = { valid, flagged, reason };
+                if (flagged) console.log(`  [BSI/T2] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+                console.log(`  [BSI/T2] ✅ Hunter email: ${t2Found.first_name} ${t2Found.last_name} → ${hEmail} (score ${score})`);
+              } else {
+                console.log(`  [BSI/T2] ❌ ${hEmail} failed verification (${reason}) for ${t2Found.first_name} ${t2Found.last_name} — trying pattern...`);
+              }
             } else if (hEmail) {
               console.log(`  [BSI/T2] ⚠️  ${t2Found.first_name} ${t2Found.last_name} → ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'})`);
             } else {
@@ -1052,13 +971,16 @@ async function saveToAirtable(deduplicatedSignals) {
             const constructed = applyHunterPattern(t2Pattern, t2Found.first_name, t2Found.last_name, bsiDomain);
             if (constructed && !isFakeEmail(constructed)) {
               console.log(`  [Pattern/BSI/T2] "${t2Pattern}" → ${constructed} — verifying...`);
-              const valid = await verifyEmailWithHunter(constructed);
+              const { valid, flagged, reason } = await verifyEmail(constructed, 'hunter', null);
               await new Promise(r => setTimeout(r, 400));
               if (valid) {
                 t2Found.email = constructed;
+                t2Found.email_flagged    = flagged || undefined;
+                t2Found.emailVerification = { valid, flagged, reason };
+                if (flagged) console.log(`  [Pattern/BSI/T2] ⚠️  ${constructed} flagged as risky (${reason}) — saving with [unverified] note`);
                 console.log(`  [Pattern/BSI/T2] ✅ ${t2Found.first_name} ${t2Found.last_name} → ${constructed}`);
               } else {
-                console.log(`  [Pattern/BSI/T2] ❌ ${constructed} failed verification`);
+                console.log(`  [Pattern/BSI/T2] ❌ ${constructed} failed verification (${reason})`);
               }
             }
           }
@@ -1103,13 +1025,17 @@ async function saveToAirtable(deduplicatedSignals) {
             if (!c.firstName?.trim()) continue; // skip contacts with no name — unreachable
             const apolloEmail = c.email && !isFakeEmail(c.email) ? c.email : null;
             signal.bsi_contacts.push({
-              first_name:   c.firstName,
-              last_name:    c.lastName,
-              title:        c.title,
-              email:        apolloEmail,
-              linkedin_url: c.linkedin_url,
-              source:       'apollo',
-              send_day:     assignSendDay(c.title)
+              first_name:        c.firstName,
+              last_name:         c.lastName,
+              title:             c.title,
+              email:             apolloEmail,
+              // Apollo broadcast emails come from a professional database — mark valid so
+              // getEmailVerifiedStatus() doesn't incorrectly show 'Unverified' in Airtable.
+              // Step 3.3 will run Hunter person-finder for contacts still missing email.
+              emailVerification: apolloEmail ? { valid: true, flagged: false, reason: 'apollo_broadcast' } : undefined,
+              linkedin_url:      c.linkedin_url,
+              source:            'apollo',
+              send_day:          assignSendDay(c.title)
             });
             console.log(`  [BSI/T3] ➕ Apollo: ${c.firstName} ${c.lastName} (${c.title})${apolloEmail ? ` ✉️ ${apolloEmail}` : ''}`);
           }
@@ -1142,6 +1068,10 @@ async function saveToAirtable(deduplicatedSignals) {
                 last_name:    e.last_name  || '',
                 title:        e.position   || null,
                 email,
+                // Hunter domain-search emails pass isFakeEmail() — mark valid so
+                // getEmailVerifiedStatus() doesn't incorrectly show 'Unverified' in Airtable.
+                // Step 3.3 will run Hunter person-finder for contacts still missing email.
+                emailVerification: email ? { valid: true, flagged: false, reason: 'hunter_domain' } : undefined,
                 linkedin_url: e.linkedin   || null,
                 source:       'hunter',
                 send_day:     assignSendDay(e.position)
@@ -1162,6 +1092,12 @@ async function saveToAirtable(deduplicatedSignals) {
         if (signal.bsi_contacts.length > 0 && process.env.HUNTER_API_KEY) {
           for (const contact of signal.bsi_contacts) {
             if (contact.email || !contact.first_name) continue;
+            // Hunter requires both first AND last name — skip if no last name to avoid a
+            // guaranteed 400 error that records a circuit breaker failure.
+            if (!contact.last_name) {
+              console.log(`  [BSI/T3] ⏭️  Skipping Hunter for ${contact.first_name} (${contact.title || 'Unknown Title'}) — no last name`);
+              continue;
+            }
             console.log(`  [BSI/T3] Hunter searching for ${contact.first_name} ${contact.last_name} (${contact.title || 'Unknown Title'}) at ${bsiDomain}...`);
             try {
               const hRes = await axios.get('https://api.hunter.io/v2/email-finder', {
@@ -1170,8 +1106,17 @@ async function saveToAirtable(deduplicatedSignals) {
               });
               const { email: hEmail, score } = hRes.data?.data || {};
               if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-                contact.email = hEmail;
-                console.log(`  [BSI/T3] ✅ Hunter: ${contact.first_name} ${contact.last_name} → ${hEmail} (score ${score})`);
+                const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
+                await new Promise(r => setTimeout(r, 400));
+                if (valid) {
+                  contact.email = hEmail;
+                  contact.email_flagged    = flagged || undefined;
+                  contact.emailVerification = { valid, flagged, reason };
+                  if (flagged) console.log(`  [BSI/T3] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+                  console.log(`  [BSI/T3] ✅ Hunter: ${contact.first_name} ${contact.last_name} → ${hEmail} (score ${score})`);
+                } else {
+                  console.log(`  [BSI/T3] ❌ ${hEmail} failed verification (${reason}) for ${contact.first_name} ${contact.last_name} — will try pattern`);
+                }
               } else if (hEmail) {
                 console.log(`  [BSI/T3] ⚠️  ${contact.first_name} ${contact.last_name} → ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'})`);
               } else {
@@ -1221,13 +1166,16 @@ async function saveToAirtable(deduplicatedSignals) {
               const constructed = applyHunterPattern(t3Pattern, contact.first_name, contact.last_name, bsiDomain);
               if (!constructed || isFakeEmail(constructed)) continue;
               console.log(`  [Pattern/BSI/T3] "${t3Pattern}" → ${constructed} — verifying...`);
-              const valid = await verifyEmailWithHunter(constructed);
+              const { valid, flagged, reason } = await verifyEmail(constructed, 'hunter', null);
               await new Promise(r => setTimeout(r, 400));
               if (valid) {
                 contact.email = constructed;
+                contact.email_flagged    = flagged || undefined;
+                contact.emailVerification = { valid, flagged, reason };
+                if (flagged) console.log(`  [Pattern/BSI/T3] ⚠️  ${constructed} flagged as risky (${reason}) — saving with [unverified] note`);
                 console.log(`  [Pattern/BSI/T3] ✅ ${contact.first_name} ${contact.last_name} → ${constructed}`);
               } else {
-                console.log(`  [Pattern/BSI/T3] ❌ ${constructed} failed verification`);
+                console.log(`  [Pattern/BSI/T3] ❌ ${constructed} failed verification (${reason})`);
               }
             }
           }
@@ -1273,11 +1221,20 @@ async function saveToAirtable(deduplicatedSignals) {
       return;
     }
 
-    // Check if email already came through from the fetch stage (all other signal types)
-    const alreadyHasEmail = signal.person?.email && !isFakeEmail(signal.person.email);
-    if (alreadyHasEmail) {
-      console.log(`  [Email] ✅ ${signal.company.name} — email already on signal (${signal.person.email})`);
-      return;
+    // Check if email already came through from the fetch stage (PDL, AudienceLab, etc.)
+    // These come from third-party databases that can be months stale — verify before trusting.
+    if (signal.person?.email && !isFakeEmail(signal.person.email)) {
+      const { valid, flagged, reason } = await verifyEmail(signal.person.email, 'hunter', null);
+      await new Promise(r => setTimeout(r, 400));
+      if (valid) {
+        signal._email_flagged    = flagged || undefined;
+        signal.emailVerification = { valid, flagged, reason };
+        if (flagged) console.log(`  [Email] ⚠️  ${signal.company.name} — pre-loaded email flagged as risky (${reason}) — saving with [unverified] note`);
+        console.log(`  [Email] ✅ ${signal.company.name} — pre-loaded email verified (${signal.person.email})`);
+        return;
+      }
+      console.log(`  [Email] ❌ ${signal.company.name} — pre-loaded email ${signal.person.email} failed verification (${reason}) — running cascade`);
+      signal.person.email = null; // clear so the cascade below can find a good one
     }
 
     // ── Website Visitor with known person: run person-specific email lookup ──────
@@ -1327,12 +1284,19 @@ async function saveToAirtable(deduplicatedSignals) {
 
       // Step 1: Apollo people/match via LinkedIn URL (if available)
       if (signal.person.linkedin_url) {
-        const apolloEmail = await findEmailWithApollo(signal);
-        if (apolloEmail && !isFakeEmail(apolloEmail)) {
-          signal.person.email = apolloEmail;
-          console.log(`  [Apollo/WV] ✅ ${signal.company.name} → ${apolloEmail}`);
+        const apolloResult = await findEmailWithApollo(signal);
+        if (apolloResult?.email && !isFakeEmail(apolloResult.email)) {
+          const { valid, flagged, reason } = await verifyEmail(apolloResult.email, 'apollo', apolloResult.emailStatus);
           await new Promise(r => setTimeout(r, 400));
-          return;
+          if (valid) {
+            signal.person.email = apolloResult.email;
+            signal._email_flagged    = flagged || undefined;
+            signal.emailVerification = { valid, flagged, reason };
+            if (flagged) console.log(`  [Apollo/WV] ⚠️  ${apolloResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+            console.log(`  [Apollo/WV] ✅ ${signal.company.name} → ${apolloResult.email}`);
+            return;
+          }
+          console.log(`  [Apollo/WV] ❌ ${apolloResult.email} failed verification (${reason}) — continuing cascade`);
         }
       }
 
@@ -1346,11 +1310,19 @@ async function saveToAirtable(deduplicatedSignals) {
           });
           const { email: hEmail, score } = hRes.data?.data || {};
           if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-            signal.person.email = hEmail;
-            console.log(`  [Hunter/WV] ✅ ${signal.person.first_name} ${signal.person.last_name} at ${signal.company.name} → ${hEmail} (score ${score})`);
-            return;
+            const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
+            await new Promise(r => setTimeout(r, 400));
+            if (valid) {
+              signal.person.email = hEmail;
+              signal._email_flagged    = flagged || undefined;
+              signal.emailVerification = { valid, flagged, reason };
+              if (flagged) console.log(`  [Hunter/WV] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+              console.log(`  [Hunter/WV] ✅ ${signal.person.first_name} ${signal.person.last_name} at ${signal.company.name} → ${hEmail} (score ${score})`);
+              return;
+            }
+            console.log(`  [Hunter/WV] ❌ ${hEmail} failed verification (${reason}) — trying pattern...`);
           } else if (hEmail) {
-            console.log(`  [Hunter/WV] ⚠️  ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'}) — trying Puppeteer...`);
+            console.log(`  [Hunter/WV] ⚠️  ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'}) — trying pattern...`);
           } else {
             console.log(`  [Hunter/WV] ℹ️  No email found — trying Puppeteer...`);
           }
@@ -1358,7 +1330,7 @@ async function saveToAirtable(deduplicatedSignals) {
           const status = err.response?.status;
           if (status === 429)      console.warn(`  [Hunter/WV] ⏳ Rate limited (429) at ${wvDomain} — trying Puppeteer...`);
           else if (status === 401) console.warn(`  [Hunter/WV] ❌ Unauthorized (401) — check HUNTER_API_KEY`);
-          else                     console.warn(`  [Hunter/WV] ⚠️  Error: ${err.message} — trying Puppeteer...`);
+          else { console.warn(`  [Hunter/WV] ⚠️  Error: ${err.message} — trying Puppeteer...`); getBreaker('hunter').recordFailure(err.message); }
         }
         await new Promise(r => setTimeout(r, 400));
       }
@@ -1397,14 +1369,17 @@ async function saveToAirtable(deduplicatedSignals) {
           const constructed = applyHunterPattern(wvPattern, signal.person.first_name, signal.person.last_name || '', wvDomain);
           if (constructed && !isFakeEmail(constructed)) {
             console.log(`  [Pattern/WV] "${wvPattern}" → ${constructed} — verifying...`);
-            const valid = await verifyEmailWithHunter(constructed);
+            const { valid, flagged, reason } = await verifyEmail(constructed, 'hunter', null);
             await new Promise(r => setTimeout(r, 400));
             if (valid) {
               signal.person.email = constructed;
+              signal._email_flagged    = flagged || undefined;
+              signal.emailVerification = { valid, flagged, reason };
+              if (flagged) console.log(`  [Pattern/WV] ⚠️  ${constructed} flagged as risky (${reason}) — saving with [unverified] note`);
               console.log(`  [Pattern/WV] ✅ ${signal.company.name} → ${constructed}`);
               return;
             } else {
-              console.log(`  [Pattern/WV] ❌ ${constructed} failed verification — trying Puppeteer...`);
+              console.log(`  [Pattern/WV] ❌ ${constructed} failed verification (${reason}) — trying Puppeteer...`);
             }
           }
         }
@@ -1421,9 +1396,18 @@ async function saveToAirtable(deduplicatedSignals) {
           console.log(`  [Puppeteer/WV] ❌ Rejected ${wvResult.email} — domain mismatch (expected ${wvTrustedDomain})`);
           console.log(`  [Puppeteer/WV] ℹ️  No valid email found — cascade exhausted for ${signal.company.name}`);
         } else {
-          signal._puppeteer_email  = wvResult.email;
-          signal._puppeteer_source = wvResult.source;
-          console.log(`  [Puppeteer/WV] ✅ ${signal.company.name} → ${wvResult.email}`);
+          const { valid, flagged, reason } = await verifyEmail(wvResult.email, 'puppeteer', null);
+          await new Promise(r => setTimeout(r, 400));
+          if (valid) {
+            signal._puppeteer_email  = wvResult.email;
+            signal._puppeteer_source = wvResult.source;
+            signal._email_flagged    = flagged || undefined;
+            signal.emailVerification = { valid, flagged, reason };
+            if (flagged) console.log(`  [Puppeteer/WV] ⚠️  ${wvResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+            console.log(`  [Puppeteer/WV] ✅ ${signal.company.name} → ${wvResult.email}`);
+          } else {
+            console.log(`  [Puppeteer/WV] ❌ ${wvResult.email} failed verification (${reason}) — cascade exhausted for ${signal.company.name}`);
+          }
         }
       } else {
         console.log(`  [Puppeteer/WV] ℹ️  No email found — cascade exhausted for ${signal.company.name}`);
@@ -1432,17 +1416,24 @@ async function saveToAirtable(deduplicatedSignals) {
     }
 
     // Step 1: Apollo people/match (Job Change only — needs LinkedIn URL)
-    const apolloEmail = await findEmailWithApollo(signal);
-    if (apolloEmail && !isFakeEmail(apolloEmail)) {
-      const knownDomain = getKnownDomain(signal.company.name);
-      const apolloEmailDomain = apolloEmail.split('@')[1]?.toLowerCase() || '';
+    const apolloResult = await findEmailWithApollo(signal);
+    if (apolloResult?.email && !isFakeEmail(apolloResult.email)) {
+      const knownDomain       = getKnownDomain(signal.company.name);
+      const apolloEmailDomain = apolloResult.email.split('@')[1]?.toLowerCase() || '';
       if (knownDomain && !apolloEmailDomain.endsWith(knownDomain)) {
-        console.log(`  [Apollo] ⚠️  Rejected ${apolloEmail} — domain (${apolloEmailDomain}) doesn't match company (${knownDomain})`);
+        console.log(`  [Apollo] ⚠️  Rejected ${apolloResult.email} — domain (${apolloEmailDomain}) doesn't match company (${knownDomain})`);
       } else {
-        signal.person = signal.person || {};
-        signal.person.email = apolloEmail;
+        const { valid, flagged, reason } = await verifyEmail(apolloResult.email, 'apollo', apolloResult.emailStatus);
         await new Promise(r => setTimeout(r, 400));
-        return;
+        if (valid) {
+          signal.person = signal.person || {};
+          signal.person.email = apolloResult.email;
+          signal._email_flagged    = flagged || undefined;
+          signal.emailVerification = { valid, flagged, reason };
+          if (flagged) console.log(`  [Apollo] ⚠️  ${apolloResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+          return;
+        }
+        console.log(`  [Apollo] ❌ ${apolloResult.email} failed verification (${reason}) — continuing cascade`);
       }
     }
 
@@ -1462,10 +1453,17 @@ async function saveToAirtable(deduplicatedSignals) {
     if (signal.type === 'Job Change') {
       const hunterEmail = await findEmailWithHunterPerson(signal);
       if (hunterEmail && !isFakeEmail(hunterEmail)) {
-        signal.person = signal.person || {};
-        signal.person.email = hunterEmail;
+        const { valid, flagged, reason } = await verifyEmail(hunterEmail, 'hunter', null);
         await new Promise(r => setTimeout(r, 400));
-        return;
+        if (valid) {
+          signal.person = signal.person || {};
+          signal.person.email = hunterEmail;
+          signal._email_flagged    = flagged || undefined;
+          signal.emailVerification = { valid, flagged, reason };
+          if (flagged) console.log(`  [Hunter/JC] ⚠️  ${hunterEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+          return;
+        }
+        console.log(`  [Hunter/JC] ❌ ${hunterEmail} failed verification (${reason}) — continuing cascade`);
       }
     }
 
@@ -1474,8 +1472,32 @@ async function saveToAirtable(deduplicatedSignals) {
       let puppeteerCalledForCompany = false;
 
       for (const contact of signal.ma_contacts) {
-        if (contact.email) continue;
         if (!contact.name) continue;
+
+        // If Apollo's search result already included an email, verify it before accepting.
+        // Previously this was skipped (if (contact.email) continue) which meant Apollo emails
+        // for M&A contacts were never verified — inconsistent with Job Change handling.
+        if (contact.email && !contact.email_verified) {
+          if (!isFakeEmail(contact.email)) {
+            const { valid, flagged, reason } = await verifyEmail(contact.email, 'apollo', contact.email_status || null);
+            await new Promise(r => setTimeout(r, 400));
+            if (valid) {
+              contact.email_flagged     = flagged || undefined;
+              contact.emailVerification = { valid, flagged, reason };
+              contact.email_verified    = true;
+              signal.emailVerification  = { valid, flagged, reason };
+              if (flagged) console.log(`  [Apollo/MA] ⚠️  ${contact.email} flagged (${reason}) — saving with [unverified] note`);
+              else         console.log(`  [Apollo/MA] ✅ ${contact.name} → ${contact.email} verified`);
+              continue;
+            }
+            console.log(`  [Apollo/MA] ❌ ${contact.email} failed verification (${reason}) — clearing and trying Hunter`);
+            contact.email = null; // clear so Hunter can try
+          } else {
+            console.log(`  [Apollo/MA] ⛔ ${contact.email} is fake — clearing and trying Hunter`);
+            contact.email = null;
+          }
+        }
+        if (contact.email) continue; // already verified above
         const [firstName, ...rest] = contact.name.split(' ');
         const lastName = rest.join(' ');
         if (!firstName) continue;
@@ -1493,10 +1515,18 @@ async function saveToAirtable(deduplicatedSignals) {
             });
             const { email: hEmail, score } = res.data?.data || {};
             if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-              contact.email = hEmail;
-              console.log(`  [Hunter/MA] ✅ ${contact.name} (${contact.title}) → ${hEmail} (score ${score})`);
+              const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
               await new Promise(r => setTimeout(r, 400));
-              continue;
+              if (valid) {
+                contact.email = hEmail;
+                contact.email_flagged    = flagged || undefined;
+                contact.emailVerification = { valid, flagged, reason };
+                signal.emailVerification  = { valid, flagged, reason }; // M&A: last found email wins
+                if (flagged) console.log(`  [Hunter/MA] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+                console.log(`  [Hunter/MA] ✅ ${contact.name} (${contact.title}) → ${hEmail} (score ${score})`);
+                continue;
+              }
+              console.log(`  [Hunter/MA] ❌ ${hEmail} failed verification (${reason}) for ${contact.name} — will try Puppeteer`);
             } else if (hEmail) {
               console.log(`  [Hunter/MA] ⚠️  ${contact.name} → ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'})`);
             } else {
@@ -1506,7 +1536,7 @@ async function saveToAirtable(deduplicatedSignals) {
             const status = err.response?.status;
             if (status === 429)      console.warn(`  [Hunter/MA] ⏳ Rate limited (429) for ${contact.name}`);
             else if (status === 401) console.warn(`  [Hunter/MA] ❌ Unauthorized (401) — check HUNTER_API_KEY`);
-            else                     console.warn(`  [Hunter/MA] ⚠️  Error for ${contact.name}: ${err.message}`);
+            else { console.warn(`  [Hunter/MA] ⚠️  Error for ${contact.name}: ${err.message}`); getBreaker('hunter').recordFailure(err.message); }
           }
           await new Promise(r => setTimeout(r, 400));
         }
@@ -1522,8 +1552,18 @@ async function saveToAirtable(deduplicatedSignals) {
           'CEO OR CMO OR CFO OR COO OR President'
         );
         if (puppeteerResult?.email && !isFakeEmail(puppeteerResult.email)) {
-          stillMissing.email = puppeteerResult.email;
-          console.log(`  [Puppeteer/MA] ✅ ${stillMissing.name} → ${puppeteerResult.email}`);
+          const { valid, flagged, reason } = await verifyEmail(puppeteerResult.email, 'puppeteer', null);
+          await new Promise(r => setTimeout(r, 400));
+          if (valid) {
+            stillMissing.email = puppeteerResult.email;
+            stillMissing.email_flagged    = flagged || undefined;
+            stillMissing.emailVerification = { valid, flagged, reason };
+            signal.emailVerification       = { valid, flagged, reason }; // M&A: last found email wins
+            if (flagged) console.log(`  [Puppeteer/MA] ⚠️  ${puppeteerResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+            console.log(`  [Puppeteer/MA] ✅ ${stillMissing.name} → ${puppeteerResult.email}`);
+          } else {
+            console.log(`  [Puppeteer/MA] ❌ ${puppeteerResult.email} failed verification (${reason}) — contacts will show LinkedIn only`);
+          }
         } else {
           console.log(`  [Puppeteer/MA] ℹ️  No email found — contacts will show LinkedIn only`);
         }
@@ -1550,11 +1590,18 @@ async function saveToAirtable(deduplicatedSignals) {
           getBreaker('hunter').recordSuccess();
           const { email: hEmail, score } = res.data?.data || {};
           if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-            signal._puppeteer_email  = hEmail;
-            signal._puppeteer_source = `Hunter (${extracted.firstName} ${extracted.lastName})`;
-            console.log(`  [Hunter/NP] ✅ ${extracted.firstName} ${extracted.lastName} → ${hEmail} (score ${score})`);
+            const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
             await new Promise(r => setTimeout(r, 400));
-            return;
+            if (valid) {
+              signal._puppeteer_email  = hEmail;
+              signal._puppeteer_source = `Hunter (${extracted.firstName} ${extracted.lastName})`;
+              signal._email_flagged    = flagged || undefined;
+              signal.emailVerification = { valid, flagged, reason };
+              if (flagged) console.log(`  [Hunter/NP] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+              console.log(`  [Hunter/NP] ✅ ${extracted.firstName} ${extracted.lastName} → ${hEmail} (score ${score})`);
+              return;
+            }
+            console.log(`  [Hunter/NP] ❌ ${hEmail} failed verification (${reason}) — falling through to domain search`);
           } else if (hEmail) {
             console.log(`  [Hunter/NP] ⚠️  ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'}) — falling through to domain search`);
           } else {
@@ -1582,8 +1629,11 @@ async function saveToAirtable(deduplicatedSignals) {
       const apolloExec = await apolloFindExec(domain, signal.type);
       if (apolloExec?.firstName) {
         console.log(`  [Apollo/NP] ✅ ${signal.company.name} → found ${apolloExec.firstName} ${apolloExec.lastName} (${apolloExec.title || 'exec'})`);
-        // Hand the Apollo-identified exec to Hunter for a targeted email lookup
-        if (process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen()) {
+        // Hand the Apollo-identified exec to Hunter for a targeted email lookup.
+        // Hunter requires both first and last name — skip if Apollo returned no last name
+        // (some Apollo records have only a first name, which causes a Hunter 400 error and
+        //  records a circuit breaker failure, potentially tripping the breaker for the whole run).
+        if (process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen() && apolloExec.lastName) {
           try {
             const res = await axios.get('https://api.hunter.io/v2/email-finder', {
               params: { domain, first_name: apolloExec.firstName, last_name: apolloExec.lastName, api_key: process.env.HUNTER_API_KEY },
@@ -1592,11 +1642,18 @@ async function saveToAirtable(deduplicatedSignals) {
             getBreaker('hunter').recordSuccess();
             const { email: hEmail, score } = res.data?.data || {};
             if (hEmail && score >= 70 && !isFakeEmail(hEmail)) {
-              signal._puppeteer_email  = hEmail;
-              signal._puppeteer_source = `Apollo+Hunter (${apolloExec.firstName} ${apolloExec.lastName})`;
-              console.log(`  [Apollo/NP] ✅ ${apolloExec.firstName} ${apolloExec.lastName} → ${hEmail} (score ${score})`);
+              const { valid, flagged, reason } = await verifyEmail(hEmail, 'hunter', null);
               await new Promise(r => setTimeout(r, 400));
-              return;
+              if (valid) {
+                signal._puppeteer_email  = hEmail;
+                signal._puppeteer_source = `Apollo+Hunter (${apolloExec.firstName} ${apolloExec.lastName})`;
+                signal._email_flagged    = flagged || undefined;
+                signal.emailVerification = { valid, flagged, reason };
+                if (flagged) console.log(`  [Apollo/NP] ⚠️  ${hEmail} flagged as risky (${reason}) — saving with [unverified] note`);
+                console.log(`  [Apollo/NP] ✅ ${apolloExec.firstName} ${apolloExec.lastName} → ${hEmail} (score ${score})`);
+                return;
+              }
+              console.log(`  [Apollo/NP] ❌ ${hEmail} failed verification (${reason}) — falling through to domain search`);
             } else if (hEmail) {
               console.log(`  [Apollo/NP] ⚠️  ${hEmail} rejected (score ${score || 'n/a'}${isFakeEmail(hEmail) ? ', fake' : ', below threshold'}) — falling through to domain search`);
             } else {
@@ -1623,10 +1680,17 @@ async function saveToAirtable(deduplicatedSignals) {
     if (signal.type !== 'Job Change') {
       hunterResult = await findEmailWithHunterDomain(signal);
       if (hunterResult?.email && !isFakeEmail(hunterResult.email)) {
-        signal._puppeteer_email  = hunterResult.email;
-        signal._puppeteer_source = `Hunter${hunterResult.title ? ` (${hunterResult.title})` : ''}`;
+        const { valid, flagged, reason } = await verifyEmail(hunterResult.email, 'hunter', null);
         await new Promise(r => setTimeout(r, 400));
-        return;
+        if (valid) {
+          signal._puppeteer_email  = hunterResult.email;
+          signal._puppeteer_source = `Hunter${hunterResult.title ? ` (${hunterResult.title})` : ''}`;
+          signal._email_flagged    = flagged || undefined;
+          signal.emailVerification = { valid, flagged, reason };
+          if (flagged) console.log(`  [Hunter] ⚠️  ${hunterResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+          return;
+        }
+        console.log(`  [Hunter] ❌ ${hunterResult.email} failed verification (${reason}) — trying pattern...`);
       }
     }
 
@@ -1680,10 +1744,13 @@ async function saveToAirtable(deduplicatedSignals) {
           const constructed = applyHunterPattern(pattern, targetFirst, targetLast, domain);
           if (constructed && !isFakeEmail(constructed)) {
             console.log(`  [Pattern] "${pattern}" → ${constructed} — verifying...`);
-            const valid = await verifyEmailWithHunter(constructed);
+            const { valid, flagged, reason } = await verifyEmail(constructed, 'hunter', null);
             await new Promise(r => setTimeout(r, 400));
             if (valid) {
+              if (flagged) console.log(`  [Pattern] ⚠️  ${constructed} flagged as risky (${reason}) — saving with [unverified] note`);
               console.log(`  [Pattern] ✅ ${signal.company.name} → ${constructed}`);
+              signal._email_flagged    = flagged || undefined;
+              signal.emailVerification = { valid, flagged, reason };
               if (signal.type === 'Job Change') {
                 signal.person = signal.person || {};
                 signal.person.email = constructed;
@@ -1719,14 +1786,23 @@ async function saveToAirtable(deduplicatedSignals) {
       const emailDomain   = result.email.split('@')[1]?.toLowerCase() || '';
       if (trustedDomain && !emailDomain.endsWith(trustedDomain)) {
         console.log(`  [Puppeteer] ❌ Rejected ${result.email} — domain mismatch (expected ${trustedDomain})`);
-        console.log(`  [Enrich] ⚠️  ${signal.company.name} — no valid email found across all cascade steps`);
+        console.log(`[Email Enrichment] ✗ No valid email found for ${signal.company.name} after all steps — Contact Info will show "Contact Needed"`);
       } else {
-        signal._puppeteer_email  = result.email;
-        signal._puppeteer_source = result.source;
-        console.log(`  [Puppeteer] ✅ ${signal.company.name} → ${result.email}`);
+        const { valid, flagged, reason } = await verifyEmail(result.email, 'puppeteer', null);
+        if (valid) {
+          signal._puppeteer_email  = result.email;
+          signal._puppeteer_source = result.source;
+          signal._email_flagged    = flagged || undefined;
+          signal.emailVerification = { valid, flagged, reason };
+          if (flagged) console.log(`  [Puppeteer] ⚠️  ${result.email} flagged as risky (${reason}) — saving with [unverified] note`);
+          console.log(`  [Puppeteer] ✅ ${signal.company.name} → ${result.email}`);
+        } else {
+          console.log(`  [Puppeteer] ❌ ${result.email} failed verification (${reason})`);
+          console.log(`[Email Enrichment] ✗ No valid email found for ${signal.company.name} after all steps — Contact Info will show "Contact Needed"`);
+        }
       }
     } else {
-      console.log(`  [Enrich] ⚠️  ${signal.company.name} — no email found across all cascade steps`);
+      console.log(`[Email Enrichment] ✗ No valid email found for ${signal.company.name} after all steps — Contact Info will show "Contact Needed"`);
     }
   }
 

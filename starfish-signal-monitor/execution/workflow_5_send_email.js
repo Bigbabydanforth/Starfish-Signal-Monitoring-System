@@ -259,8 +259,26 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // Parse --since and --until date flags
     const sinceIdx = process.argv.indexOf('--since');
     const untilIdx = process.argv.indexOf('--until');
-    const sinceDate = sinceIdx !== -1 ? process.argv[sinceIdx + 1] : null;
-    const untilDate = untilIdx !== -1 ? process.argv[untilIdx + 1] : null;
+    const rawSince = sinceIdx !== -1 ? process.argv[sinceIdx + 1] : null;
+    const rawUntil = untilIdx !== -1 ? process.argv[untilIdx + 1] : null;
+
+    // Validate date format — must be YYYY-MM-DD with valid calendar values
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    function isValidDate(str) {
+      if (!str || !DATE_RE.test(str)) return false;
+      const d = new Date(`${str}T00:00:00Z`);
+      return !isNaN(d.getTime()) && d.toISOString().startsWith(str);
+    }
+    if (rawSince && !isValidDate(rawSince)) {
+      console.error(`[Workflow 5] ❌ Invalid --since date: "${rawSince}" — must be YYYY-MM-DD`);
+      process.exit(1);
+    }
+    if (rawUntil && !isValidDate(rawUntil)) {
+      console.error(`[Workflow 5] ❌ Invalid --until date: "${rawUntil}" — must be YYYY-MM-DD`);
+      process.exit(1);
+    }
+    const sinceDate = rawSince;
+    const untilDate = rawUntil;
 
     // Build Airtable filter formula
     // IS_SAME() is required for date field matching — Airtable's >= / <= operators

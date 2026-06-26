@@ -4,7 +4,7 @@ import fs from 'fs';
 import path, { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
-import { extractCompanyName, parseHeadquarters } from './text_parsing.js';
+import { extractCompanyName, parseHeadquarters, sanitizeApiInput, sanitizeRevenue } from './text_parsing.js';
 import { query as airtableQuery } from './airtable_client.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -89,19 +89,24 @@ async function enrichCompanyWithApollo(companyName, websiteUrl) {
   try {
     const body = {};
     if (websiteUrl) {
-      body.domain = websiteUrl
+      body.domain = sanitizeApiInput(websiteUrl
         .replace(/^https?:\/\//i, '')
         .replace(/^www\./i, '')
-        .replace(/\/.*$/, '');
+        .replace(/\/.*$/, ''));
     } else {
-      body.name = companyName;
+      body.name = sanitizeApiInput(companyName);
     }
     const res = await axios.post(`${baseUrl}/organizations/enrich`, body, {
       headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Content-Type': 'application/json' },
       timeout: 15000  // 15s matches all other API calls — prevents one slow Apollo response from occupying a concurrency slot for 30s
     });
     return res.data?.organization || res.data || {};
-  } catch (_) {
+  } catch (err) {
+    const status = err.response?.status;
+    if (status !== 422 && status !== 404) {
+      // 422/404 = company not in Apollo — expected, not worth logging
+      console.warn(`  [Apollo/enrich] Company enrichment failed for "${companyName || websiteUrl}" (${status ?? err.message})`);
+    }
     return {};
   }
 }
@@ -145,8 +150,9 @@ async function enrichWithPDL(linkedinUrl) {
     if (status === 404) return null; // person not in PDL database
     if (status === 402) console.warn('[PDL] Credits exhausted — skipping PDL fallback');
     else {
-      const detail = JSON.stringify(err.response?.data ?? {});
-      console.warn(`[PDL] Lookup failed (${status ?? err.message}) — ${detail}`);
+      // Log status and message only — never log response body which may echo API keys
+      const errMsg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+      console.warn(`[PDL] Lookup failed (${status ?? 'network'}) — ${errMsg}`);
     }
     return null;
   }
@@ -186,8 +192,8 @@ async function fetchApolloSignals() {
       }
 
       if (status === 422) {
-        const detail = JSON.stringify(err.response?.data ?? {});
-        throw new Error(`Apollo API: unprocessable request (422) — ${detail}`);
+        const errMsg = err.response?.data?.error || err.response?.data?.message || 'unprocessable request';
+        throw new Error(`Apollo API: 422 — ${errMsg}`);
       }
 
       if (status === 429 && attempt === 1) {
@@ -254,8 +260,8 @@ async function fetchApolloSignals() {
         timeout: 30000
       });
       fullPerson = enrichRes.data.person || enrichRes.data || person;
-    } catch (_) {
-      // If enrichment fails, fall back to search result and skip date check
+    } catch (enrichErr) {
+      console.warn(`  [Apollo] Person enrichment failed for ${person.id} — using search result: ${enrichErr.message}`);
     }
 
     // Find current role in employment history
@@ -285,7 +291,7 @@ async function fetchApolloSignals() {
     if (!startDate) skippedNoDate++;
 
     const org     = fullPerson.organization || person.organization || {};
-    const revenue = org.annual_revenue || org.estimated_annual_revenue || 0;
+    const revenue = sanitizeRevenue(org.annual_revenue || org.estimated_annual_revenue) ?? 0;
 
     signals.push({
       type:       'Job Change',
@@ -377,7 +383,7 @@ async function fetchPDLSignals() {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await axios.get('https://api.peopledatalabs.com/v5/person/search', {
-        params:  { sql: SQL, size: 50 },
+        params:  { sql: SQL, size: 75 },
         headers: { 'X-Api-Key': process.env.PDL_API_KEY },
         timeout: 30000
       });
@@ -454,7 +460,7 @@ async function fetchPDLSignals() {
     // PDL's SQL query already confirmed $50M+ inferred revenue. Only use Apollo's
     // revenue when it returns a positive value — never overwrite with 0, which would
     // cause workflow_2 to incorrectly drop the signal.
-    const apolloRevenue = org.annual_revenue || org.estimated_annual_revenue || 0;
+    const apolloRevenue = sanitizeRevenue(org.annual_revenue || org.estimated_annual_revenue) ?? 0;
     const revenue    = apolloRevenue > 0 ? apolloRevenue : null;
 
     signals.push({
@@ -906,7 +912,7 @@ async function fetchPredictLeadsSignals() {
 
       company: {
         name:           companyName,
-        revenue:        companyAttrs.annual_revenue  || null,
+        revenue:        sanitizeRevenue(companyAttrs.annual_revenue) ?? null,
         funding_total:  companyAttrs.total_funding   || null,
         funding_stage:  companyAttrs.funding_stage   || null,
         headquarters,
@@ -973,7 +979,7 @@ async function fetchPredictLeadsSignals() {
 
       company: {
         name:           companyName,
-        revenue:        companyAttrs.annual_revenue  || null,
+        revenue:        sanitizeRevenue(companyAttrs.annual_revenue) ?? null,
         funding_total:  companyAttrs.total_funding   || null,
         funding_stage:  companyAttrs.funding_stage   || null,
         headquarters,
