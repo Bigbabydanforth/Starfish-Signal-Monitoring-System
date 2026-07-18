@@ -18,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { query as airtableQuery } from './airtable_client.js';
+import { query as airtableQuery, queryInBase as airtableQueryInBase } from './airtable_client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -68,9 +68,15 @@ function normalizeWebsite(domain) {
 }
 
 // ── Pagination cursor — tracks which page each segment left off at ────────────
-// Saved to .tmp/audiencelab_cursor.json so each run picks up where the last stopped.
+// Saved so each run picks up where the last stopped.
 // When a segment is fully exhausted, its cursor resets to 1 for the next cycle.
-const CURSOR_FILE = path.join(TMP_DIR, 'audiencelab_cursor.json');
+//
+// Storage path priority:
+//   1. RAILWAY_VOLUME_MOUNT_PATH — Railway persistent volume (survives container restarts).
+//      Set this in Railway by adding a Volume and setting RAILWAY_VOLUME_MOUNT_PATH to its mount path.
+//   2. .tmp/ — local default (wiped on Railway container restart, fine for local dev).
+const _cursorDir  = process.env.RAILWAY_VOLUME_MOUNT_PATH || TMP_DIR;
+const CURSOR_FILE = path.join(_cursorDir, 'audiencelab_cursor.json');
 
 function loadCursor() {
   try {
@@ -83,7 +89,11 @@ function loadCursor() {
 
 function saveCursor(cursor) {
   try {
+    if (!fs.existsSync(_cursorDir)) fs.mkdirSync(_cursorDir, { recursive: true });
     fs.writeFileSync(CURSOR_FILE, JSON.stringify(cursor, null, 2));
+    if (process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+      console.log(`[AudienceLab] Cursor saved to Railway volume (${CURSOR_FILE})`);
+    }
   } catch (err) {
     console.warn('[AudienceLab] Could not save cursor file:', err.message);
   }
@@ -120,6 +130,27 @@ async function fetchFromPage(segmentId, segmentLabel, startPage, maxRecordsNeede
 
     } catch (err) {
       const status = err.response?.status;
+      if (status === 429) {
+        // Rate limited — AudienceLab uses a per-minute window.
+        // Wait 60s (full minute reset) then retry once. 10s was not long enough.
+        console.warn(`[AudienceLab] ${segmentLabel} page ${page} rate limited (429) — waiting 60s for rate limit to reset...`);
+        await new Promise(r => setTimeout(r, 60000));
+        try {
+          const retryRes = await axios.get(url, { headers: { 'X-Api-Key': API_KEY }, timeout: 15000 });
+          const data = retryRes.data;
+          totalPages = data.total_pages || totalPages;
+          records.push(...(data.data || []));
+          console.log(`[AudienceLab] ${segmentLabel} page ${page} — retry succeeded after rate limit wait`);
+          page++;
+          if (page <= totalPages && records.length < maxRecordsNeeded) {
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          continue;
+        } catch (retryErr) {
+          console.error(`[AudienceLab] ${segmentLabel} page ${page} still rate limited after 60s — stopping this segment`);
+          break;
+        }
+      }
       console.error(`[AudienceLab] ${segmentLabel} page ${page} failed (${status ?? err.message}) — stopping`);
       break;
     }
@@ -158,16 +189,28 @@ async function fetchAudienceLabSignals() {
   console.log(`[AudienceLab] Resuming from cursor — Pixel page ${cursor.pixel_start_page}, Leads page ${cursor.leads_start_page}`);
 
   // ── Load existing AudienceLab company names from Airtable (last 90 days) ────
+  // When a separate AudienceLab base is configured, AudienceLab records are written
+  // there — not to the main base. Query BOTH so cross-run dedup works correctly.
   const cutoff90Str = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const alBaseId    = process.env.AUDIENCELAB_AIRTABLE_BASE_ID;
+  const alTableName = process.env.AUDIENCELAB_AIRTABLE_TABLE_NAME;
+  const useAlBase   = !!(alBaseId && alTableName);
   const existingNames = new Set();
+  const alFilter = `AND(OR({Signal Type} = "Website Visitor", {Signal Type} = "Brand Strategy Intent"), IS_AFTER({Date Detected}, "${cutoff90Str}"))`;
   try {
-    const existing = await airtableQuery({
-      filterByFormula: `AND(OR({Signal Type} = "Website Visitor", {Signal Type} = "Brand Strategy Intent"), IS_AFTER({Date Detected}, "${cutoff90Str}"))`,
-      fields: ['Company Name']
-    });
-    for (const rec of existing) {
+    // Always query the main base — some AudienceLab records may live there too.
+    const mainExisting = await airtableQuery({ filterByFormula: alFilter, fields: ['Company Name'] });
+    for (const rec of mainExisting) {
       const name = rec.fields?.['Company Name'];
       if (name) existingNames.add(normalizeName(name));
+    }
+    // Also query the separate AudienceLab base when configured.
+    if (useAlBase) {
+      const alExisting = await airtableQueryInBase(alBaseId, alTableName, { filterByFormula: alFilter, fields: ['Company Name'] });
+      for (const rec of alExisting) {
+        const name = rec.fields?.['Company Name'];
+        if (name) existingNames.add(normalizeName(name));
+      }
     }
     console.log(`[AudienceLab] ${existingNames.size} AudienceLab companies seen in last 90 days — will skip`);
   } catch (err) {
@@ -264,6 +307,13 @@ async function fetchAudienceLabSignals() {
       const companyName = (record.COMPANY_NAME || '').trim();
       if (!companyName) { leadsSkipped++; continue; }
 
+      // Leads records do not carry a timestamp field (unlike Pixel's EVENT_TIMESTAMP).
+      // A date-based recency filter cannot be applied here. The pagination cursor
+      // (leads_start_page) ensures we process pages in order and advance forward each
+      // run, so stale records on old pages are not reprocessed. If AudienceLab adds
+      // a date field in future, add a cutoff30 check here like the Pixel segment.
+      // NOTE: CREATED_AT / UPDATED_AT are not present in the API response as of 2026.
+
       const normalized = normalizeName(companyName);
       if (existingNames.has(normalized) || seenThisRun.has(normalized)) { leadsSkipped++; continue; }
       seenThisRun.add(normalized);
@@ -306,8 +356,11 @@ async function fetchAudienceLabSignals() {
     console.log(`[AudienceLab] Leads: ${leadsAdded} new signals (${leadsSkipped} skipped) — next run starts at page ${nextLeadsPage}`);
   }
 
-  // ── Save cursor for next run ──────────────────────────────────────────────────
-  saveCursor({ pixel_start_page: nextPixelPage, leads_start_page: nextLeadsPage });
+  // ── DO NOT save cursor here ───────────────────────────────────────────────────
+  // The cursor is returned alongside signals so main.js can commit it ONLY after
+  // Workflow 4 (Airtable save) succeeds. If we save here and the pipeline crashes
+  // in Workflow 2–5, these signals are lost forever — the cursor already advanced.
+  const pendingCursor = { pixel_start_page: nextPixelPage, leads_start_page: nextLeadsPage };
 
   // Save raw for debugging
   fs.writeFileSync(
@@ -317,7 +370,7 @@ async function fetchAudienceLabSignals() {
 
   console.log(`[AudienceLab] Total new: ${allSignals.length} (${pixelAdded} Pixel Website Visitors, ${leadsAdded} Brand Strategy Intent Leads)`);
 
-  return allSignals;
+  return { signals: allSignals, pendingCursor };
 }
 
-export { fetchAudienceLabSignals };
+export { fetchAudienceLabSignals, saveCursor };

@@ -10,7 +10,7 @@ export function extractDomain(website) {
 
 // Title keywords for BSI domain-search — marketing/brand ONLY.
 // No CEO/CFO/COO — for BSI we need the person who owns the brand budget.
-const HUNTER_BSI_TITLE_KEYWORDS = [
+export const HUNTER_BSI_TITLE_KEYWORDS = [
   'cmo', 'chief marketing', 'chief brand',
   'vp marketing', 'vp of marketing', 'vp brand', 'vp of brand',
   'svp marketing', 'svp brand', 'evp marketing', 'evp brand',
@@ -21,20 +21,25 @@ const HUNTER_BSI_TITLE_KEYWORDS = [
   'director of marketing', 'marketing director', 'director of brand', 'brand director',
   'director of brand marketing', 'brand officer'
 ];
-const HUNTER_BSI_DEPT_KEYWORDS = ['marketing', 'brand'];
+export const HUNTER_BSI_DEPT_KEYWORDS = ['marketing', 'brand'];
 
 // Title keywords for News/Press & M&A domain-search — marketing/brand + senior decision-makers.
 // Deliberately excludes CFO, CIO, CTO, CHRO — Starfish sells branding/marketing services,
 // so those roles have no budget or mandate for brand work.
-const HUNTER_EXEC_TITLE_KEYWORDS = [
+export const HUNTER_EXEC_TITLE_KEYWORDS = [
   ...HUNTER_BSI_TITLE_KEYWORDS,
   'ceo', 'chief executive',
   'coo', 'chief operating',
   'cro', 'chief revenue',
   'president',
-  'managing partner', 'managing director', 'partner'
+  // Senior/Executive VP without a function — valid senior targets at large companies.
+  // Marketing SVPs/EVPs are already in HUNTER_BSI_TITLE_KEYWORDS; these catch bare titles.
+  'senior vice president', 'executive vice president',
+  // Partner-level contacts — primary targets at law firms, consulting, and PE firms.
+  'managing partner', 'senior partner', 'equity partner', 'founding partner',
+  'managing director', 'partner'
 ];
-const HUNTER_EXEC_DEPT_KEYWORDS = ['marketing', 'brand', 'executive'];
+export const HUNTER_EXEC_DEPT_KEYWORDS = ['marketing', 'brand', 'executive'];
 
 // Apollo email reveal — try to get a real work email before falling back to Puppeteer.
 // Uses /people/match with the person's LinkedIn URL. Never throws — returns null on failure.
@@ -176,6 +181,21 @@ export async function findEmailWithHunterDomain(signal) {
     };
 
     const execEmails = emails.filter(e => isExec(e));
+    // Prefer marketing/brand contacts (CMO, VP Marketing, etc.) over CEO/President.
+    // Sort: marketing titles first, CEO/President as last resort.
+    execEmails.sort((a, b) => {
+      const aPos = (a.position || '').toLowerCase();
+      const bPos = (b.position || '').toLowerCase();
+      const aIsMarketing = titleKws === HUNTER_BSI_TITLE_KEYWORDS
+        ? titleKws.some(k => aPos.includes(k))
+        : HUNTER_BSI_TITLE_KEYWORDS.some(k => aPos.includes(k));
+      const bIsMarketing = titleKws === HUNTER_BSI_TITLE_KEYWORDS
+        ? titleKws.some(k => bPos.includes(k))
+        : HUNTER_BSI_TITLE_KEYWORDS.some(k => bPos.includes(k));
+      if (aIsMarketing && !bIsMarketing) return -1;
+      if (!aIsMarketing && bIsMarketing) return 1;
+      return 0;
+    });
     const pick = execEmails[0] || null;  // Never fall back to non-exec contacts
     const name  = pick ? `${pick.first_name || ''} ${pick.last_name || ''}`.trim() : null;
     const title = pick?.position || null;

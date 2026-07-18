@@ -37,6 +37,7 @@ function formatDisplayDate(dateOrString) {
 
 function formatShortDate(isoString) {
   return new Date(isoString).toLocaleDateString('en-US', {
+    timeZone: 'America/New_York', // match cron timezone — prevents off-by-one on UTC servers
     year: 'numeric',
     month: 'long',
     day: 'numeric'

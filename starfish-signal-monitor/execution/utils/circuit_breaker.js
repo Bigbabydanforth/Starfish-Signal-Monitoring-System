@@ -82,3 +82,25 @@ export function getBreaker(name) {
   if (!_breakers[name]) _breakers[name] = new CircuitBreaker(name);
   return _breakers[name];
 }
+
+/**
+ * Reset all circuit breakers to CLOSED at the start of each pipeline run.
+ *
+ * Without this, a breaker tripped during one cron run (e.g. 5AM Monday) stays
+ * OPEN until its 5-minute cooldown — but since the process persists between
+ * daily cron runs, that tripped state is still visible at 5AM Tuesday.
+ * Resetting at run start ensures each daily run gets a clean slate.
+ *
+ * Called by main.js at the top of runAllWorkflows().
+ */
+export function resetAllBreakers() {
+  for (const name of Object.keys(_breakers)) {
+    const b = _breakers[name];
+    if (b.state !== 'CLOSED') {
+      console.log(`[Circuit/${name}] Reset to CLOSED at pipeline start`);
+    }
+    b.state         = 'CLOSED';
+    b.failures      = 0;
+    b.nextAttemptAt = 0;
+  }
+}

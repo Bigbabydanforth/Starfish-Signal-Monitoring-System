@@ -209,8 +209,23 @@ async function validateDomainBelongsToCompany(page, domain, companyName) {
   const sigWords = getSignificantWords(companyName);
   if (sigWords.length === 0) return true; // Nothing to check -- trust it
 
+  // Quick domain-name check: if the domain itself contains the significant company
+  // name words, trust it immediately without loading the page. This avoids Puppeteer
+  // being blocked by Cloudflare / bot protection on valid domains like republicfinance.com.
+  const domainCore = domain
+    .replace(/\.[a-z]{2,6}(\.[a-z]{2})?$/, '')  // strip any TLD (covers .com, .in, .ai, .co.uk etc)
+    .replace(/-/g, '')
+    .toLowerCase();
+  const domainMatchCount = sigWords.filter(w => domainCore.includes(w)).length;
+  const domainMatchRatio = domainMatchCount / sigWords.length;
+  const domainThreshold = sigWords.length === 1 ? 1.0 : 0.6;
+  if (domainMatchRatio >= domainThreshold) {
+    console.log(`    [Validate] ${domain} confirmed for "${companyName}" (domain name match)`);
+    return true;
+  }
+
   try {
-    await page.goto(`https://${domain}`, { waitUntil: 'domcontentloaded', timeout: 12000 });
+    await page.goto(`https://${domain}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
     const pageText = await page.evaluate(() => {
       const title = (document.title || '').toLowerCase();
@@ -235,7 +250,7 @@ async function validateDomainBelongsToCompany(page, domain, companyName) {
     let domainPenalty = 0;
     if (sigWords.length <= 2) {
       const domainCore = domain
-        .replace(/\.(com|org|net|io|co|ai|app|tech|ag|fm|tv|us|ca|uk|au)(\.[a-z]{2})?$/, '')
+        .replace(/\.[a-z]{2,6}(\.[a-z]{2})?$/, '')  // strip any TLD
         .toLowerCase();
 
       // Case A -- hyphenated domain (e.g. nourish-poultry): extra hyphen segments not in company name

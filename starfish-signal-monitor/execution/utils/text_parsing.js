@@ -35,6 +35,14 @@ function extractCompanyName(article) {
     /\bappointments?\s*$/i,     // "...appointments"
     /^\d+\s/,                   // starts with a number "10 Trends..."
     /^[a-z][a-z0-9\s]*$/,       // all-lowercase — URL slug or noise (real names are Title Case)
+    /^here\b/i,                 // "Here are 6 notable names" extracted as candidate
+    /^these\b/i,
+    /^those\b/i,
+    /^check out\b/i,
+    /^meet\b/i,
+    /^introducing\b/i,
+    /\bnotable names?\b/i,      // "6 notable names" — listicle noun, never a company
+    /\bnames? to (know|watch|follow)\b/i, // "names to know in branding"
   ];
 
   function validate(raw) {
@@ -105,6 +113,12 @@ function extractCompanyName(article) {
     /^releases?\b/i,            // "Releases May 2026 Update"
     /^strengthens?\b/i,         // "Strengthens management team..."
     /^completes?\b/i,           // "Completes acquisition of..."
+    /^here\b/i,                 // "Here are 6 notable names..."
+    /^these\b/i,                // "These are the top names..."
+    /^those\b/i,                // "Those names include..."
+    /^check out\b/i,            // "Check Out These Top Names..."
+    /^meet\b/i,                 // "Meet the names behind..."
+    /^introducing\b/i,          // "Introducing the names to know"
   ];
   if (HEADLINE_PREFIXES.some(re => re.test(title))) return null;
 
@@ -158,11 +172,13 @@ function parseHeadquarters(hqString) {
 // Normalize a company name for deduplication comparison.
 // Replace & with "and" BEFORE stripping so "Smith & Associates" ≠ "Smith Associates".
 // Without this, both normalize to "smithassociates" causing false duplicate matches.
-let _nullNameSeq = 0;
 function normalizeCompanyName(name) {
-  // M2: return a unique sentinel so null/undefined names never collide in the dedup Set
-  // (two signals with missing names would otherwise both map to '' and be wrongly merged)
-  if (!name || typeof name !== 'string') return `\x00null_${_nullNameSeq++}`;
+  // Null/undefined names get a fixed sentinel — they are never treated as duplicates
+  // of each other (the dedup Set would wrongly merge them if they all mapped to ''),
+  // but a signal with no company name should not block a real signal from saving.
+  // The sentinel starts with \x00 which can never appear in a real company name,
+  // so it will never accidentally collide with a real normalized name.
+  if (!name || typeof name !== 'string') return '\x00UNKNOWN_COMPANY';
   return name
     .toLowerCase()
     .trim()

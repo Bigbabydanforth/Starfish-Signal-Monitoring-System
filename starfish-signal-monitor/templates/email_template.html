@@ -183,6 +183,39 @@
     .signal-meta a:hover {
       text-decoration: underline;
     }
+    .contacts-list {
+      margin-bottom: 8px;
+    }
+    .contact-row {
+      padding: 3px 0;
+      font-size: 13px;
+      color: #555555;
+      line-height: 1.5;
+    }
+    .day-badge {
+      display: inline-block;
+      background-color: #EBF5FB;
+      color: #2980B9;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 8px;
+      margin-right: 3px;
+      letter-spacing: 0.3px;
+    }
+    .verif-verified   { color: #27AE60; font-size: 12px; }
+    .verif-unverified { color: #E67E22; font-size: 12px; }
+    .verif-no-email   { color: #95A5A6; font-size: 12px; }
+    .contact-needed-block {
+      background-color: #FEF9E7;
+      border-left: 3px solid #F39C12;
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-size: 13px;
+      color: #555555;
+      line-height: 1.7;
+      margin-bottom: 8px;
+    }
     .footer {
       background-color: #F8F9FA;
       padding: 30px 20px;
@@ -268,13 +301,18 @@
           <div class="signal-details">{{signal_details}}</div>
           <div class="signal-brief">{{brief}}</div>
           <div class="signal-meta">
-            {{#if bsi_broadcast}}
-            <strong>Broadcast Contacts ({{bsi_broadcast_count}} found — staggered):</strong><br>
-            {{#each bsi_broadcast}}Day {{day}}: <strong>{{name}}</strong>, {{title}} — {{contact}}<br>{{/each}}
-            {{else if bsi_contact_needed}}
-            <strong>⚠️ Contact Needed</strong>{{#if company_website}} — <a href="{{company_website}}">{{company_website}}</a>{{/if}}<br>
-            {{else}}
-            <strong>Contact:</strong> {{contact_info}}<br>
+            {{#if contacts}}
+            <div class="contacts-list">
+              <strong>Contacts ({{contacts_count}} found):</strong><br>
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+            </div>
+            {{else if contact_needed}}
+            <div class="contact-needed-block">
+              <strong>⚠️ Contact Needed</strong><br>
+              No marketing contact identified in Apollo or Hunter.<br>
+              {{#if company_website}}<strong>Company website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+              <em>Recommended: Search LinkedIn for CMO, VP Marketing, or Head of Brand at {{company_name}}</em>
+            </div>
             {{/if}}
             <strong>Industry:</strong> {{industry}}<br>
             <strong>Source:</strong> <a href="{{source_url}}">View Details</a>
@@ -298,13 +336,18 @@
           <div class="signal-details">{{signal_details}}</div>
           <div class="signal-brief">{{brief}}</div>
           <div class="signal-meta">
-            {{#if bsi_broadcast}}
-            <strong>Broadcast Contacts ({{bsi_broadcast_count}} found — staggered):</strong><br>
-            {{#each bsi_broadcast}}Day {{day}}: <strong>{{name}}</strong>, {{title}} — {{contact}}<br>{{/each}}
-            {{else if bsi_contact_needed}}
-            <strong>⚠️ Contact Needed</strong>{{#if company_website}} — <a href="{{company_website}}">{{company_website}}</a>{{/if}}<br>
-            {{else}}
-            <strong>Contact:</strong> {{contact_info}}<br>
+            {{#if contacts}}
+            <div class="contacts-list">
+              <strong>Contacts ({{contacts_count}} found):</strong><br>
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+            </div>
+            {{else if contact_needed}}
+            <div class="contact-needed-block">
+              <strong>⚠️ Contact Needed</strong><br>
+              No marketing contact identified in Apollo or Hunter.<br>
+              {{#if company_website}}<strong>Company website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+              <em>Recommended: Search LinkedIn for CMO, VP Marketing, or Head of Brand at {{company_name}}</em>
+            </div>
             {{/if}}
             <strong>Industry:</strong> {{industry}}<br>
             <strong>Source:</strong> <a href="{{source_url}}">View Details</a>
@@ -328,13 +371,18 @@
           <div class="signal-details">{{signal_details}}</div>
           <div class="signal-brief">{{brief}}</div>
           <div class="signal-meta">
-            {{#if bsi_broadcast}}
-            <strong>Broadcast Contacts ({{bsi_broadcast_count}} found — staggered):</strong><br>
-            {{#each bsi_broadcast}}Day {{day}}: <strong>{{name}}</strong>, {{title}} — {{contact}}<br>{{/each}}
-            {{else if bsi_contact_needed}}
-            <strong>⚠️ Contact Needed</strong>{{#if company_website}} — <a href="{{company_website}}">{{company_website}}</a>{{/if}}<br>
-            {{else}}
-            <strong>Contact:</strong> {{contact_info}}<br>
+            {{#if contacts}}
+            <div class="contacts-list">
+              <strong>Contacts ({{contacts_count}} found):</strong><br>
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+            </div>
+            {{else if contact_needed}}
+            <div class="contact-needed-block">
+              <strong>⚠️ Contact Needed</strong><br>
+              No marketing contact identified in Apollo or Hunter.<br>
+              {{#if company_website}}<strong>Company website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+              <em>Recommended: Search LinkedIn for CMO, VP Marketing, or Head of Brand at {{company_name}}</em>
+            </div>
             {{/if}}
             <strong>Industry:</strong> {{industry}}<br>
             <strong>Source:</strong> <a href="{{source_url}}">View Details</a>
@@ -349,8 +397,8 @@
       <div class="priority-section research">
         <h3>🔍 Research Needed</h3>
         <div class="research-note">
-          These companies are actively researching brand strategy but no direct contact was found automatically.
-          Carly — please find the right person (CMO, VP Marketing, or equivalent) on LinkedIn for each.
+          No marketing contact was identified automatically for these signals.
+          Please find the right person (CMO, VP Marketing, Head of Brand, or equivalent) on LinkedIn for each.
         </div>
         {{#each RESEARCH_NEEDED_SIGNALS}}
         <div class="signal-card research">
@@ -362,8 +410,19 @@
           <div class="signal-details">{{signal_details}}</div>
           <div class="signal-brief">{{brief}}</div>
           <div class="signal-meta">
-            <strong>Action:</strong> Find CEO, COO, President, or anyone in Marketing / Communications<br>
-            {{#if company_website}}<strong>Website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+            {{#if contacts}}
+            <div class="contacts-list">
+              <strong>Contacts ({{contacts_count}} found):</strong><br>
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+            </div>
+            {{else if contact_needed}}
+            <div class="contact-needed-block">
+              <strong>⚠️ Contact Needed</strong><br>
+              No marketing contact identified in Apollo or Hunter.<br>
+              {{#if company_website}}<strong>Company website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+              <em>Recommended: Search LinkedIn for CMO, VP Marketing, or Head of Brand at {{company_name}}</em>
+            </div>
+            {{/if}}
             <strong>Industry:</strong> {{industry}}<br>
             <strong>Source:</strong> <a href="{{source_url}}">View Details</a>
           </div>

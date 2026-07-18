@@ -61,13 +61,16 @@ async function createRecords(records, timeoutMs = 30000) {
 // baseId: Airtable base ID (e.g. process.env.AUDIENCELAB_AIRTABLE_BASE_ID)
 // tableName: table name or ID string
 // records: array of { fields: { ... } } objects (max 10 per call)
+// Wrapped in withBackoff() — same retry/timeout behaviour as createRecords().
 async function createRecordsInBase(baseId, tableName, records, timeoutMs = 30000) {
-  const base           = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(baseId);
-  const writePromise   = base(tableName).create(records);
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Airtable createInBase timed out after ${timeoutMs}ms`)), timeoutMs)
-  );
-  return Promise.race([writePromise, timeoutPromise]);
+  return withBackoff(async () => {
+    const base           = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(baseId);
+    const writePromise   = base(tableName).create(records);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Airtable createInBase timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    return Promise.race([writePromise, timeoutPromise]);
+  }, 'createRecordsInBase');
 }
 
 // Update existing records in the Signals table.
@@ -108,4 +111,17 @@ async function deleteRecords(ids, timeoutMs = 30000) {
   return results;
 }
 
-export { query, createRecords, createRecordsInBase, updateRecords, deleteRecords };
+// Query records from a specific base + table (used for AudienceLab separate base dedup).
+// Same timeout + backoff behaviour as query().
+async function queryInBase(baseId, tableName, options = {}, timeoutMs = 30000) {
+  return withBackoff(async () => {
+    const base           = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(baseId);
+    const queryPromise   = base(tableName).select(options).all();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Airtable queryInBase timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    return Promise.race([queryPromise, timeoutPromise]);
+  }, 'queryInBase');
+}
+
+export { query, queryInBase, createRecords, createRecordsInBase, updateRecords, deleteRecords };

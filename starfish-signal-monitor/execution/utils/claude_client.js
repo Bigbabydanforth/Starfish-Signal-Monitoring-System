@@ -11,7 +11,11 @@ const SYSTEM_PROMPT = `You are analyzing intent signals for Starfish, a high-end
 
 For M&A Activity signals: the entire C-Suite of the acquiring company (CEO, COO, CMO, CFO, CIO, CHRO, etc.) becomes relevant — a merger creates immediate brand integration, repositioning, and culture alignment needs. If a PE firm is involved, the firm's partners are also key contacts as they drive post-acquisition brand strategy decisions.
 
-For Brand Strategy Intent signals: the contact person will be identified and enriched separately by the pipeline. Do NOT invent, guess, or name any specific person. Write only about the company, its situation, and why the intent signal matters. Your contact_approach should recommend which executive role to target (e.g. CMO, VP Marketing) without naming an individual.`;
+For Brand Strategy Intent signals: the contact person will be identified and enriched separately by the pipeline. Do NOT invent, guess, or name any specific person. Write only about the company, its situation, and why the intent signal matters. Your contact_approach should recommend which executive role to target (e.g. CMO, VP Marketing) without naming an individual.
+
+For Rebrand signals: priority depends on timing.
+- Past tense language ("unveiled new brand", "launched new identity", "completed rebrand", "revealed new logo", "has rebranded", "announced new look", "introduced new identity", "now operating as") = MEDIUM priority. The work is already done — Starfish can offer refinement or future activation.
+- Future tense or trigger language ("plans to rebrand", "will rebrand", "as part of merger", "following acquisition", "new CEO announces rebrand", "is rebranding", "in connection with", "to be renamed", "undergoing rebrand") = HIGH priority. This is an active, open opportunity.`;
 
 // Standard template — used for all signal types except Brand Strategy Intent
 const USER_PROMPT_TEMPLATE = `Signal Type: {SIGNAL_TYPE}
@@ -127,6 +131,29 @@ async function callClaude(userMessage) {
   return text;
 }
 
+// Infer the industry for a company when Apollo/PDL returned nothing.
+// Uses a single low-token Haiku call — non-critical, failures are silently swallowed.
+// Returns a string like "Financial Services" or null on failure.
+async function inferIndustry(companyName, website) {
+  try {
+    const message = await client.messages.create(
+      {
+        model:      CLAUDE_MODEL,
+        max_tokens: 30,
+        messages: [{
+          role:    'user',
+          content: `What industry is "${companyName}" (${website || 'no website'}) in? Reply with ONLY the industry name, nothing else. Use standard categories like: Financial Services, Healthcare, Technology, Legal Services, Real Estate, Consumer Goods, Retail, Manufacturing, Media & Entertainment, Professional Services, Education, Energy, Transportation, Food & Beverage, Hospitality, Construction, Insurance, Telecommunications.`
+        }]
+      },
+      { timeout: 10_000 }
+    );
+    const text = message.content[0]?.text?.trim();
+    return text || null;
+  } catch (_) {
+    return null;  // non-critical — caller falls back to 'Unknown'
+  }
+}
+
 // Enrich a signal using Claude API.
 // promptVars: { SIGNAL_TYPE, COMPANY_NAME, INDUSTRY, REVENUE, EMPLOYEE_COUNT, SIGNAL_DETAILS }
 // Returns: { priority, brief, contact_approach }
@@ -148,4 +175,4 @@ async function enrichSignal(promptVars) {
   }
 }
 
-export { enrichSignal };
+export { enrichSignal, inferIndustry };

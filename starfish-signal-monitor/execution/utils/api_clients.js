@@ -7,6 +7,13 @@ import { fileURLToPath } from 'url';
 import { extractCompanyName, parseHeadquarters, sanitizeApiInput, sanitizeRevenue } from './text_parsing.js';
 import { query as airtableQuery } from './airtable_client.js';
 
+// Retry delay with jitter — prevents thundering herd when multiple concurrent
+// workflow runs all hit a rate limit and retry at exactly the same moment.
+// base: base delay in ms. Returns a value between base and base * 1.5.
+function retryDelay(base = 30000) {
+  return base + Math.floor(Math.random() * base * 0.5);
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TMP_DIR = resolve(__dirname, '../../.tmp');
@@ -197,8 +204,9 @@ async function fetchApolloSignals() {
       }
 
       if (status === 429 && attempt === 1) {
-        console.warn('[Apollo] Rate limit hit (429) — retrying in 30 seconds...');
-        await new Promise(r => setTimeout(r, 30000));
+        const delay = retryDelay(30000);
+        console.warn(`[Apollo] Rate limit hit (429) — retrying in ${Math.round(delay / 1000)}s...`);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
 
@@ -321,6 +329,7 @@ async function fetchApolloSignals() {
         title:           fullPerson.title        || person.title        || null,
         linkedin_url:    fullPerson.linkedin_url || person.linkedin_url || null,
         email:           fullPerson.email        || null,
+        email_status:    fullPerson.email_status || null, // Apollo's own deliverability verdict — used downstream in verifyEmail()
         job_started_at:  startDate
       },
 
@@ -383,7 +392,7 @@ async function fetchPDLSignals() {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await axios.get('https://api.peopledatalabs.com/v5/person/search', {
-        params:  { sql: SQL, size: 75 },
+        params:  { sql: SQL, size: 110 },
         headers: { 'X-Api-Key': process.env.PDL_API_KEY },
         timeout: 30000
       });
@@ -394,8 +403,9 @@ async function fetchPDLSignals() {
       if (status === 402) throw new Error('PDL Source: credits exhausted (402)');
       if (status === 401) throw new Error('PDL Source: invalid API key (401)');
       if (status === 429 && attempt === 1) {
-        console.warn('[PDL] Rate limit (429) — waiting 30s before retry...');
-        await new Promise(r => setTimeout(r, 30000));
+        const delay = retryDelay(30000);
+        console.warn(`[PDL] Rate limit (429) — waiting ${Math.round(delay / 1000)}s before retry...`);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
       throw new Error(`PDL Source: ${err.message}`);
@@ -539,6 +549,24 @@ if (process.env.BLOCKED_DOMAINS_EXTRA) {
 
 // Keywords are queried one at a time because MediaStack applies AND logic when
 // multiple keywords are comma-separated, making multi-keyword queries return 0.
+//
+// Rebrand keywords use a 90-day lookback window — Starfish rule: always check 90 days back
+// for rebrand signals so a company that rebranded two months ago is still catchable.
+const MEDIASTACK_REBRAND_KEYWORDS = new Set([
+  'rebrand', 'brand refresh', 'brand launch', 'brand identity', 'brand repositioning'
+]);
+
+// Phrases scanned in article title + description to catch rebrand stories that
+// arrived via a non-rebrand keyword (e.g. a "merger" article that also mentions a rebrand).
+const REBRAND_CONTENT_PHRASES = [
+  'rebrand', 'rebranding', 'rebranded',
+  'brand refresh', 'brand overhaul', 'brand redesign', 'brand revamp',
+  'new brand identity', 'new brand name',
+  'brand launch', 'brand repositioning',
+  'brand transformation', 'new visual identity',
+  'new name and logo', 'new logo and name'
+];
+
 const MEDIASTACK_KEYWORDS = [
   // Rebranding / brand activity — all specific to corporate brand work
   'rebrand',
@@ -617,13 +645,18 @@ async function fetchMediaStackSignals() {
   const allArticles = [];
   const seenUrls    = new Set();
 
+  // 90-day lookback for rebrand keywords — Starfish rule: check back 90 days for rebrands.
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
   for (const keyword of MEDIASTACK_KEYWORDS) {
+    const isRebrandKeyword = MEDIASTACK_REBRAND_KEYWORDS.has(keyword);
     const params = {
       access_key: process.env.MEDIASTACK_API_KEY,
       countries:  'us',
       keywords:   keyword,
-      limit:      5,   // 5 per keyword × 10 keywords = 50 max before deduplication
-      sort:       'published_desc'
+      limit:      isRebrandKeyword ? 50 : 5,  // rebrand: 50 articles over 90 days; others: 5 latest
+      sort:       'published_desc',
+      ...(isRebrandKeyword ? { date: `${ninetyDaysAgo},${todayStr}` } : {})
     };
 
     let raw;
@@ -637,8 +670,9 @@ async function fetchMediaStackSignals() {
         throw new Error('MediaStack API: invalid API key (401) — check MEDIASTACK_API_KEY in .env');
       }
       if (status === 429) {
-        console.warn(`[MediaStack] Rate limit on "${keyword}" — waiting 30s...`);
-        await new Promise(r => setTimeout(r, 30000));
+        const delay = retryDelay(30000);
+        console.warn(`[MediaStack] Rate limit on "${keyword}" — waiting ${Math.round(delay / 1000)}s...`);
+        await new Promise(r => setTimeout(r, delay));
         try {
           const retry = await axios.get(url, { params, timeout: 30000 });
           raw = retry.data;
@@ -656,7 +690,7 @@ async function fetchMediaStackSignals() {
       const key = article.url || article.title;
       if (key && !seenUrls.has(key)) {
         seenUrls.add(key);
-        allArticles.push(article);
+        allArticles.push({ ...article, _source_keyword: keyword });
       }
     }
   }
@@ -689,8 +723,12 @@ async function fetchMediaStackSignals() {
     const companyName = extractCompanyName(article);
     if (!companyName) continue;
 
+    const articleContent = `${article.title || ''} ${article.description || ''}`.toLowerCase();
+    const isRebrandArticle = MEDIASTACK_REBRAND_KEYWORDS.has(article._source_keyword) ||
+      REBRAND_CONTENT_PHRASES.some(kw => articleContent.includes(kw));
+
     signals.push({
-      type:       'News/Press',
+      type:       isRebrandArticle ? 'Rebrand' : 'News/Press',
       source:     'MediaStack',
       source_url: article.url || null,
 
@@ -707,20 +745,31 @@ async function fetchMediaStackSignals() {
         stock_ticker:   null
       },
 
-      article: {
-        title:        article.title        || null,
-        description:  article.description  || null,
-        source:       article.source       || null,
-        category:     article.category     || null,
-        published_at: article.published_at || null
-      },
+      ...(isRebrandArticle ? {
+        rebrand: {
+          new_name:   null,
+          summary:    article.title || null,
+          found_at:   article.published_at || null,
+          confidence: null
+        }
+      } : {
+        article: {
+          title:        article.title        || null,
+          description:  article.description  || null,
+          source:       article.source       || null,
+          category:     article.category     || null,
+          published_at: article.published_at || null
+        }
+      }),
 
       detected_date: todayStr,
       raw_data:      article
     });
   }
 
-  console.log(`[MediaStack] Fetched ${signals.length} news/press signals (${recentArticles.length - signals.length} discarded — no company name extracted)`);
+  const rebrandCount  = signals.filter(s => s.type === 'Rebrand').length;
+  const newspressCount = signals.filter(s => s.type === 'News/Press').length;
+  console.log(`[MediaStack] Fetched ${signals.length} signals — ${rebrandCount} Rebrand, ${newspressCount} News/Press (${recentArticles.length - signals.length} discarded — no company name extracted)`);
 
   return signals;
 }
@@ -749,31 +798,40 @@ async function fetchPredictLeadsSignals() {
       : {})
   };
 
-  // PredictLeads confirmed (June 2026) their ML architecture update now returns
-  // fully fresh events each day — no repeated IDs across runs verified across
-  // 5 consecutive days. Cross-category dedup by event ID is still applied to
-  // handle the same event appearing under multiple category queries.
+  // PredictLeads /discover/news_events does NOT filter by the category param —
+  // it returns a mixed pool of all recent event types regardless of what category
+  // is requested. The category param appears to affect ranking, not filtering.
+  // Evidence: querying 'rebrands_to' returns launches, signs_new_client, recognized_as, etc.
   //
-  // Pagination: each page returns up to PL_PAGE_SIZE events. We fetch up to
-  // PL_MAX_PAGES pages per category so we get well beyond the old 30-event limit.
+  // Strategy: query ONCE per page (no category filter) to get the broadest pool,
+  // then post-filter for M&A categories and detect rebrands by keyword.
+  // Previously queried 5 categories × 3 pages but received the same ~30 events deduped
+  // to 90 — wasting 4× quota for zero additional unique signals.
   const PL_PAGE_SIZE = 30;
-  const PL_MAX_PAGES = 3; // up to 90 events per category × 5 categories = 450 max
+  const PL_MAX_PAGES = 5; // 5 pages × 30 = up to 150 events (was 90 from 5 deduped queries)
 
   const MA_CATEGORIES = new Set(['acquires', 'merges_with', 'sells_assets_to', 'receives_financing']);
+  // rebrands_to: kept for when PredictLeads does return this category.
+  // Keyword detection below catches rebrand events from any category (e.g. 'launches').
   const REBRAND_CATEGORIES = new Set(['rebrands_to']);
+  const REBRAND_KEYWORDS   = ['rebrand', 'brand refresh', 'brand identity', 'new brand', 'brand launch', 'new logo', 'brand update', 'new name'];
   const cutoff        = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-  const seenIds   = new Set();
-  let rawData     = [];
-  let rawIncluded = [];
+  const seenIds        = new Set();
+  const seenIncluded   = new Set(); // tracks "id|type" to avoid O(n²) .find() on rawIncluded
+  let rawData          = [];
+  let rawIncluded      = [];
 
-  for (const category of ['acquires', 'merges_with', 'sells_assets_to', 'receives_financing', 'rebrands_to']) {
+  // Single category-less query (category filter is ignored by PredictLeads API)
+  for (const category of [null]) {
     for (let page = 1; page <= PL_MAX_PAGES; page++) {
       let res = null;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
+          const params = { page, per_page: PL_PAGE_SIZE };
+          if (category) params.category = category; // omit when null — broadest discovery feed
           res = await axios.get(`${baseUrl}/discover/news_events`, {
-            params: { category, page, per_page: PL_PAGE_SIZE },
+            params,
             headers,
             timeout: 60000
           });
@@ -784,19 +842,20 @@ async function fetchPredictLeadsSignals() {
           if (status === 402) throw new Error('PredictLeads API: plan limit reached (402)');
           if (status === 429) {
             if (attempt === 1) {
-              console.warn(`[PredictLeads] Rate limit on "${category}" p${page} — waiting 30s before retry...`);
-              await new Promise(r => setTimeout(r, 30000));
+              const delay = retryDelay(30000);
+              console.warn(`[PredictLeads] Rate limit on p${page} — waiting ${Math.round(delay / 1000)}s before retry...`);
+              await new Promise(r => setTimeout(r, delay));
             } else {
-              console.warn(`[PredictLeads] Rate limit persisted on "${category}" p${page} — skipping page`);
+              console.warn(`[PredictLeads] Rate limit persisted on p${page} — skipping page`);
               break;
             }
             continue;
           }
           if (attempt === 1) {
-            console.warn(`[PredictLeads] "${category}" p${page} failed (${err.message}) — retrying in 5s...`);
+            console.warn(`[PredictLeads] p${page} failed (${err.message}) — retrying in 5s...`);
             await new Promise(r => setTimeout(r, 5000));
           } else {
-            console.warn(`[PredictLeads] "${category}" p${page} failed after retry — skipping`);
+            console.warn(`[PredictLeads] p${page} failed after retry — skipping`);
           }
         }
       }
@@ -809,7 +868,9 @@ async function fetchPredictLeadsSignals() {
         rawData.push(event);
       }
       for (const item of (res.data?.included || [])) {
-        if (!rawIncluded.find(r => r.id === item.id && r.type === item.type)) {
+        const key = `${item.id}|${item.type}`;
+        if (!seenIncluded.has(key)) {
+          seenIncluded.add(key);
           rawIncluded.push(item);
         }
       }
@@ -818,12 +879,14 @@ async function fetchPredictLeadsSignals() {
       // Exception: a 0-result middle page may be a transient API gap — retry once before stopping.
       if (pageEvents.length < PL_PAGE_SIZE) {
         if (pageEvents.length === 0 && page > 1) {
-          console.warn(`[PredictLeads] "${category}" p${page} returned 0 results mid-pagination — retrying once in 3s...`);
+          console.warn(`[PredictLeads] p${page} returned 0 results mid-pagination — retrying once in 3s...`);
           await new Promise(r => setTimeout(r, 3000));
           let retryRes = null;
           try {
+            const retryParams = { page, per_page: PL_PAGE_SIZE };
+            if (category) retryParams.category = category;
             retryRes = await axios.get(`${baseUrl}/discover/news_events`, {
-              params: { category, page, per_page: PL_PAGE_SIZE },
+              params: retryParams,
               headers,
               timeout: 60000
             });
@@ -839,7 +902,8 @@ async function fetchPredictLeadsSignals() {
               rawData.push(event);
             }
             for (const item of (retryRes?.data?.included || [])) {
-              if (!rawIncluded.find(r => r.id === item.id && r.type === item.type)) rawIncluded.push(item);
+              const key = `${item.id}|${item.type}`;
+              if (!seenIncluded.has(key)) { seenIncluded.add(key); rawIncluded.push(item); }
             }
             if (retryEvents.length < PL_PAGE_SIZE) break; // retry page was partial — truly last page
             continue; // full retry page — keep going
@@ -854,8 +918,12 @@ async function fetchPredictLeadsSignals() {
   }
 
   const maCount      = rawData.filter(e => MA_CATEGORIES.has(e.attributes?.category)).length;
-  const rebrandCount = rawData.filter(e => REBRAND_CATEGORIES.has(e.attributes?.category)).length;
-  console.log(`[PredictLeads] ${rawData.length} unique events fetched — ${maCount} are M&A, ${rebrandCount} are Rebrands`);
+  const rebrandCount = rawData.filter(e => {
+    const cat = e.attributes?.category || '';
+    const summary = (e.attributes?.summary || '').toLowerCase();
+    return REBRAND_CATEGORIES.has(cat) || REBRAND_KEYWORDS.some(kw => summary.includes(kw));
+  }).length;
+  console.log(`[PredictLeads] ${rawData.length} unique events fetched — ${maCount} are M&A, ${rebrandCount} are Rebrands (category + keyword detection)`);
 
   // Save combined raw
   fs.writeFileSync(
@@ -942,7 +1010,12 @@ async function fetchPredictLeadsSignals() {
     const attrs    = event.attributes || {};
     const category = attrs.category   || '';
 
-    if (!REBRAND_CATEGORIES.has(category)) continue;
+    // Detect rebrands: either explicit rebrands_to category, OR any event type whose
+    // summary contains rebrand language (PredictLeads often files these as 'launches').
+    const summaryLower = (attrs.summary || '').toLowerCase();
+    const isRebrand = REBRAND_CATEGORIES.has(category) ||
+      REBRAND_KEYWORDS.some(kw => summaryLower.includes(kw));
+    if (!isRebrand) continue;
 
     const foundAt = (attrs.found_at || todayStr).split('T')[0];
     if (attrs.found_at && new Date(attrs.found_at) < cutoff) continue;
@@ -1033,6 +1106,13 @@ const NEWSAPI_BLOCKED_DOMAINS = new Set([
 ]);
 
 const NEWSAPI_QUERIES = [
+  // ── Rebrand — 90-day lookback (Starfish rule) ──────────────────────────────
+  {
+    label:   'Rebrand',
+    q:       '("rebrand" OR "rebranding" OR "brand refresh" OR "new brand identity" OR "brand overhaul" OR "brand redesign" OR "brand revamp" OR "new visual identity" OR "new name and logo") -"rebrand fund" -"brand equity" -"brand awareness campaign" -"personal brand"',
+    sortBy:  'publishedAt',
+    daysBack: 90
+  },
   {
     label:   'M&A',
     q:       '("definitive agreement to acquire" OR "to be acquired by" OR "completes acquisition of" OR "agreed to acquire" OR "merger agreement with") -"net income" -"per diluted share" -"financial results" -"first quarter" -"form 10-Q" -"market size" -"market dynamics" -"market research" -"shareholder news"',
@@ -1095,19 +1175,24 @@ async function fetchNewsAPISignals() {
   const today         = todayStr.replace(/-/g, '');
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     .toISOString().split('T')[0];
+  const ninetyDaysAgoNA = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
 
   const seenTitles = new Set();
   const allArticles = [];
 
-  for (const { label, q, sortBy, domains } of NEWSAPI_QUERIES) {
+  for (const { label, q, sortBy, domains, daysBack } of NEWSAPI_QUERIES) {
+    const fromDate = daysBack === 90 ? ninetyDaysAgoNA : thirtyDaysAgo;
+    const pageSize = daysBack === 90 ? 50 : 20;  // rebrand gets more results over the larger window
+
     try {
       const res = await axios.get('https://newsapi.org/v2/everything', {
         params: {
           q,
           language: 'en',
-          from:     thirtyDaysAgo,
+          from:     fromDate,
           sortBy,
-          pageSize: 20,
+          pageSize,
           apiKey:   process.env.NEWSAPI_API_KEY,
           ...(domains ? { domains } : {})
         },
@@ -1156,8 +1241,13 @@ async function fetchNewsAPISignals() {
     const companyName = extractCompanyName(article);
     if (!companyName) continue;
 
+    // Reclassify as Rebrand if from the rebrand query OR content matches rebrand phrases
+    const naContent   = `${article.title || ''} ${article.description || ''}`.toLowerCase();
+    const isRebrand   = label === 'Rebrand' ||
+      REBRAND_CONTENT_PHRASES.some(kw => naContent.includes(kw));
+
     signals.push({
-      type:       'News/Press',
+      type:       isRebrand ? 'Rebrand' : 'News/Press',
       source:     'NewsAPI',
       source_url: article.url || null,
 
@@ -1174,13 +1264,22 @@ async function fetchNewsAPISignals() {
         stock_ticker:   null
       },
 
-      article: {
-        title:        article.title        || null,
-        description:  article.description  || null,
-        source:       article.source?.name || null,
-        category:     label,
-        published_at: article.publishedAt  || null
-      },
+      ...(isRebrand ? {
+        rebrand: {
+          new_name:   null,
+          summary:    article.title || null,
+          found_at:   article.publishedAt || null,
+          confidence: null
+        }
+      } : {
+        article: {
+          title:        article.title        || null,
+          description:  article.description  || null,
+          source:       article.source?.name || null,
+          category:     label,
+          published_at: article.publishedAt  || null
+        }
+      }),
 
       detected_date: todayStr,
       raw_data:      article
@@ -1192,7 +1291,9 @@ async function fetchNewsAPISignals() {
     JSON.stringify({ total: allArticles.length, articles: allArticles.map(a => a.article) }, null, 2)
   );
 
-  console.log(`[NewsAPI] Fetched ${signals.length} signals (M&A + funding news)`);
+  const naRebrandCount   = signals.filter(s => s.type === 'Rebrand').length;
+  const naNewspressCount = signals.filter(s => s.type === 'News/Press').length;
+  console.log(`[NewsAPI] Fetched ${signals.length} signals — ${naRebrandCount} Rebrand, ${naNewspressCount} News/Press`);
   return signals;
 }
 

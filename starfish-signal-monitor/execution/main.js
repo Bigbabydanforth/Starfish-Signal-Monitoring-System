@@ -7,6 +7,7 @@ import cron from 'node-cron';
 import express from 'express';
 
 import fetchSignals from './workflow_1_fetch_signals.js';
+import { saveCursor } from './utils/audiencelab_client.js';
 import filterSignals from './workflow_2_filter_signals.js';
 import deduplicateSignals from './workflow_3_deduplicate.js';
 import verifyPDLSignals from './workflow_3b_verify_pdl.js';
@@ -15,6 +16,7 @@ import syncToSheets from './workflow_4b_sync_sheets.js';
 import sendEmail from './workflow_5_send_email.js';
 import sendTelegramMonitoring from './workflow_6_telegram_monitoring.js';
 import { closeBrowser } from './utils/puppeteer_email_finder.js';
+import { resetAllBreakers } from './utils/circuit_breaker.js';
 
 // --- Full-run Log File ---
 // Mirrors every console.log/warn/error to .tmp/run_log_YYYYMMDD_HHMMSS.txt
@@ -157,10 +159,15 @@ async function runAllWorkflows() {
   console.log(`\n[${new Date().toISOString()}] ========================================`);
   console.log(`[${new Date().toISOString()}] Starting daily signal monitoring run`);
 
+  // Reset circuit breakers so yesterday's API failures don't block today's run.
+  // Each daily run gets a clean slate — breakers only protect within a single run.
+  resetAllBreakers();
+
   cleanupTmpFiles();
   console.log(`[${new Date().toISOString()}] ========================================`);
 
   let allSignals = [];
+  let audienceLabPendingCursor = null;
   let filteredSignals = [];
   let deduplicatedSignals = [];
   let totalInserted = 0;
@@ -173,7 +180,9 @@ async function runAllWorkflows() {
     try {
       // Workflow 1: Fetch raw signals from all 5 sources
       console.log(`\n[${new Date().toISOString()}] --- Workflow 1: Fetch Signals ---`);
-      allSignals = await fetchSignals();
+      const fetchResult = await fetchSignals();
+      allSignals = fetchResult.signals;
+      audienceLabPendingCursor = fetchResult.audienceLabPendingCursor;
       console.log(`[${new Date().toISOString()}] Workflow 1 complete: ${allSignals.length} raw signals`);
 
       // Workflow 2: Filter + Claude enrichment
@@ -195,6 +204,14 @@ async function runAllWorkflows() {
       console.log(`\n[${new Date().toISOString()}] --- Workflow 4: Save to Airtable ---`);
       totalInserted = await saveToAirtable(deduplicatedSignals);
       console.log(`[${new Date().toISOString()}] Workflow 4 complete: ${totalInserted} records saved`);
+
+      // Commit AudienceLab cursor ONLY after Airtable save succeeds.
+      // If we saved it earlier and the pipeline crashed in Workflow 2–4, those
+      // signals would be permanently skipped — cursor already advanced, records never written.
+      if (audienceLabPendingCursor) {
+        saveCursor(audienceLabPendingCursor);
+        console.log(`[${new Date().toISOString()}] AudienceLab cursor committed (Pixel: page ${audienceLabPendingCursor.pixel_start_page}, Leads: page ${audienceLabPendingCursor.leads_start_page})`);
+      }
 
       // Workflow 4b: Sync to Google Sheets (non-critical — never blocks email)
       console.log(`\n[${new Date().toISOString()}] --- Workflow 4b: Sync to Google Sheets ---`);
@@ -243,13 +260,41 @@ async function runAllWorkflows() {
 
 const cronSchedule = process.env.CRON_SCHEDULE || '0 5 * * *';
 
+// Maximum time a single pipeline run is allowed before it is considered hung.
+// If the pipeline exceeds this, the cron guard fires a Telegram alert and
+// forcibly resets isRunning so the next scheduled run is not skipped.
+const PIPELINE_TIMEOUT_MS = 90 * 60 * 1000 // 90 minutes
+
+function pipelineTimeout() {
+  return new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Pipeline timed out after 90 minutes')), PIPELINE_TIMEOUT_MS)
+  )
+}
+
 // Only register the cron when running as a persistent server (not a one-shot test/manual run).
 // In test/manual mode the process exits after the single run — a registered cron would fire
 // unexpectedly if the process stayed alive, or confusingly appear in logs alongside the test run.
 if (!process.argv.includes('--test') && !process.argv.includes('--manual')) {
   cron.schedule(cronSchedule, async () => {
     console.log(`[${new Date().toISOString()}] Cron triggered`);
-    await runAllWorkflows();
+    try {
+      await Promise.race([runAllWorkflows(), pipelineTimeout()])
+    } catch (err) {
+      // Timeout path — runAllWorkflows() is STILL running in the background.
+      // Do NOT reset isRunning here — the finally block inside runAllWorkflows()
+      // will reset it when the run genuinely finishes. Resetting it here would
+      // allow the next cron tick to start a second parallel run while the first
+      // is still writing to Airtable, causing duplicate records.
+      // If the pipeline hangs permanently, Railway will restart the process.
+      lastRunTimestamp = new Date().toISOString()
+      console.error(`[Cron] TIMEOUT: ${err.message} — pipeline still running in background, waiting for it to finish before allowing next run`)
+      try {
+        const { sendErrorAlert } = await import('./utils/telegram_client.js')
+        await sendErrorAlert(`⚠️ Pipeline TIMED OUT after 90 minutes. Still running in background — next scheduled run will be held until this one finishes. Check Railway logs immediately.`)
+      } catch (alertErr) {
+        console.error('[Cron] Telegram alert also failed:', alertErr.message)
+      }
+    }
   }, {
     timezone: 'America/New_York'
   });
@@ -269,21 +314,35 @@ if (process.argv.includes('--test') || process.argv.includes('--manual')) {
 }
 
 // --- Express Server (health check) ---
+// Only start the HTTP server in daemon/cron mode.
+// Manual/test runs are one-shot — no need to bind a port, and doing so causes
+// SIGTERM conflicts when a previous server instance is already running on the same port.
 
+const isManualRun = process.argv.includes('--manual') || process.argv.includes('--test');
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+const server = isManualRun ? null : app.listen(PORT, () => {
   console.log(`[Server] Health check available at http://localhost:${PORT}/health`);
 });
 
-// Graceful shutdown — let Railway terminate cleanly
+// Graceful shutdown — let Railway terminate cleanly.
+// If the pipeline is mid-run, skip closeBrowser() — closing the pool while enrichment
+// is actively using browser slots causes partial Airtable writes with no alert.
+// The pipeline's own finally block calls closeBrowser() when the run finishes.
 process.on('SIGTERM', async () => {
   console.log('[Server] SIGTERM received — shutting down gracefully');
-  await closeBrowser();
-  server.close(() => {
-    console.log('[Server] HTTP server closed');
+  if (!isRunning) {
+    await closeBrowser();
+  } else {
+    console.log('[Server] Pipeline mid-run — deferring browser close to pipeline finally block');
+  }
+  if (server) {
+    server.close(() => {
+      console.log('[Server] HTTP server closed');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10000);
+  } else {
     process.exit(0);
-  });
-  // Force exit after 10s if still running
-  setTimeout(() => process.exit(1), 10000);
+  }
 });
 process.on('SIGINT', () => process.emit('SIGTERM'));

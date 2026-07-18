@@ -5,6 +5,16 @@ import { dirname, resolve } from 'path';
 
 import * as airtableClient from './utils/airtable_client.js';
 import { normalizeCompanyName, isGarbageName } from './utils/text_parsing.js';
+
+// Extract bare domain from a company website URL for domain-based dedup.
+// Returns null when no URL is present or the URL is unparseable.
+function extractSignalDomain(website) {
+  if (!website) return null;
+  try {
+    const url = website.includes('://') ? website : `https://${website}`;
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch (_) { return null; }
+}
 import { getTodayStamp, getDateDaysAgo } from './utils/date_helpers.js';
 import { sendErrorAlert } from './utils/telegram_client.js';
 
@@ -22,7 +32,10 @@ function mergeSignals(signals) {
   const groups = {};
 
   for (const signal of signals) {
-    const key = normalizeCompanyName(signal.company.name);
+    // Key by both company name AND signal type — a Job Change and an M&A signal for
+    // the same company are genuinely different signals and must not be merged. Merging
+    // them drops the M&A deal object and corrupts the signal type on the surviving record.
+    const key = `${normalizeCompanyName(signal.company.name)}::${signal.type}`;
     if (!groups[key]) {
       groups[key] = [];
     }
@@ -177,9 +190,12 @@ async function deduplicateSignals(enrichedSignals) {
   // Step 3.3: Normalize recent names into a Set for O(1) lookups
   const normalizedRecent = new Set(recentCompanyNames.map(normalizeCompanyName));
 
-  // Step 3.4: Check each merged signal against Airtable history
+  // Step 3.4: Check each merged signal against Airtable history + within-batch domain dedup.
+  // Domain dedup catches cases where the same company appears with slightly different names
+  // across sources (e.g. "Quaise Energy" vs "Quaise Energy Inc") that name-normalization misses.
   const deduplicatedSignals = [];
   const duplicatesFound     = [];
+  const acceptedDomains     = new Set(); // domains of signals accepted so far this run
 
   for (const signal of mergedSignals) {
     // If Airtable query failed, pass all signals through without dedup
@@ -189,12 +205,17 @@ async function deduplicateSignals(enrichedSignals) {
     }
 
     const normalizedName = normalizeCompanyName(signal.company.name);
+    const signalDomain   = extractSignalDomain(signal.company.website);
 
     if (normalizedRecent.has(normalizedName)) {
-      console.log(`[Duplicate] Skipping (already in Airtable): ${signal.company.name}`);
+      console.log(`[Duplicate] Skipping (name match in Airtable): ${signal.company.name}`);
+      duplicatesFound.push(signal);
+    } else if (signalDomain && acceptedDomains.has(signalDomain)) {
+      console.log(`[Duplicate] Skipping (domain match in this batch): ${signal.company.name} — ${signalDomain}`);
       duplicatesFound.push(signal);
     } else {
       deduplicatedSignals.push(signal);
+      if (signalDomain) acceptedDomains.add(signalDomain);
     }
   }
 

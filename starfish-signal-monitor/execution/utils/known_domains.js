@@ -43,9 +43,7 @@ export const KNOWN_DOMAINS = {
   'Sylogist':                      'sylogist.com',
   'MindBridge':                    'mindbridge.ai',
   'Salesforce':                    'salesforce.com',
-  'salesforce':                    'salesforce.com',
   'ServiceNow':                    'servicenow.com',
-  'servicenow':                    'servicenow.com',
   'Aptum':                         'aptum.com',
   'FDH Aero':                      'fdhaero.com',
   'Motivity':                      'motivity.net',
@@ -76,12 +74,13 @@ export const KNOWN_DOMAINS = {
   'Dust':                          'dust.tt',
 };
 
+// Lowercase Map built once at module load — O(1) lookups on every call.
+// The original object is kept for readability; this index is the fast path.
+const KNOWN_DOMAINS_LOWER = new Map(
+  Object.entries(KNOWN_DOMAINS).map(([k, v]) => [k.toLowerCase(), v])
+);
+
 export function getKnownDomain(companyName) {
   if (!companyName) return null;
-  if (KNOWN_DOMAINS[companyName]) return KNOWN_DOMAINS[companyName];
-  const lower = companyName.toLowerCase();
-  for (const [k, v] of Object.entries(KNOWN_DOMAINS)) {
-    if (k.toLowerCase() === lower) return v;
-  }
-  return null;
+  return KNOWN_DOMAINS_LOWER.get(companyName.toLowerCase()) || null;
 }

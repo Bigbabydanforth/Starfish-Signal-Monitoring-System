@@ -23,7 +23,7 @@ async function sendMessage(text) {
       chat_id:    chatId,
       text:       body,
       parse_mode: 'HTML'
-    });
+    }, { timeout: 10000 });
     return true;
   } catch (err) {
     const detail = err.response?.data?.description || err.message;
@@ -85,7 +85,7 @@ async function sendSignalForVerification(signal, signalIndex, total, batchId) {
           { text: '❌ Drop',    callback_data: `drop:${batchId}:${signalIndex}`    }
         ]]
       }
-    });
+    }, { timeout: 10000 });
     return true;
   } catch (err) {
     console.error(`[Telegram] Failed to send signal ${signalIndex + 1} for verification:`, err.response?.data?.description || err.message);

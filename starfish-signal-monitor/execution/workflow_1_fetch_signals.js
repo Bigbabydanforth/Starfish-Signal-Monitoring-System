@@ -3,7 +3,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 import { fetchApolloSignals, fetchPDLSignals, fetchMediaStackSignals, fetchPredictLeadsSignals, fetchNewsAPISignals } from './utils/api_clients.js';
-import { fetchAudienceLabSignals } from './utils/audiencelab_client.js';
+import { fetchAudienceLabSignals, saveCursor } from './utils/audiencelab_client.js';
 import { getTodayStamp } from './utils/date_helpers.js';
 
 async function fetchSignals() {
@@ -17,6 +17,7 @@ async function fetchSignals() {
   let predictLeadsSignals   = [];
   let newsApiSignals        = [];
   let audienceLabSignals    = [];
+  let audienceLabPendingCursor = null; // committed by main.js AFTER Airtable save succeeds
 
   // --- Parallel Fetching (Step 1.2 to 1.7) ---
   const fetchTasks = [
@@ -80,7 +81,7 @@ async function fetchSignals() {
     {
       name: 'AudienceLab',
       fn: fetchAudienceLabSignals,
-      onSuccess: (res) => { audienceLabSignals = res; },
+      onSuccess: (res) => { audienceLabSignals = res.signals; audienceLabPendingCursor = res.pendingCursor; },
       onFailure: (err) => {
         console.error('[AudienceLab] API call failed:', err.message);
         fs.appendFileSync(`.tmp/error_log_${today}.txt`,
@@ -119,7 +120,7 @@ async function fetchSignals() {
     } catch (_) { /* alert failure must never crash the pipeline */ }
   }
 
-  return allSignals;
+  return { signals: allSignals, audienceLabPendingCursor };
 }
 
 export default fetchSignals;
@@ -169,7 +170,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
 
     try {
-      audienceLabSignals = await fetchAudienceLabSignals();
+      const alResult = await fetchAudienceLabSignals();
+      audienceLabSignals = alResult.signals;
+      // In standalone mode, commit cursor immediately — no pipeline to crash after this
+      if (alResult.pendingCursor) saveCursor(alResult.pendingCursor);
     } catch (err) {
       console.error('[AudienceLab] fetch failed:', err.message);
     }

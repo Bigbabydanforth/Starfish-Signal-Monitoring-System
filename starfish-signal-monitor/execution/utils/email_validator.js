@@ -276,8 +276,8 @@ export function isFakeEmail(email) {
 
   if (FAKE_EMAIL_PATTERNS.some(pattern => pattern.test(lower))) return true;
 
-  // Reject short local parts (e.g. e@, jd@)
-  if (localPart.length < 3) return true;
+  // Reject single-char local parts (e.g. e@) — 2-char execs like js@company.com are valid
+  if (localPart.length < 2) return true;
   // Reject local parts ending with a special character (e.g. black-@1x.png)
   if (/[-_+.]$/.test(localPart)) return true;
   // Reject personal/free email domains
