@@ -21,8 +21,9 @@ Thumbs.db
 *.swp
 *.swo
 
-# Logs
+# Logs and runtime files
 *.log
+run_log.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

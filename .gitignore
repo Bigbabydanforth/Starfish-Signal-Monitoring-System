@@ -1,0 +1,31 @@
+# ── Secrets — NEVER commit ───────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.*.local
+server/.env
+**/server/.env
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Build output ─────────────────────────────────────────────────────────────
+dist/
+dist-ssr/
+build/
+
+# ── Runtime / temp files ─────────────────────────────────────────────────────
+.tmp/
+!.tmp/.gitkeep
+*.log
+run_log.txt
+npm-debug.log*
+yarn-debug.log*
+
+# ── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
