@@ -1,0 +1,7 @@
+providers = ["node"]
+
+[phases.install]
+cmds = ["cd starfish-dashboard/server && npm ci"]
+
+[start]
+cmd = "sh -c 'cd starfish-dashboard/server && node server.js'"
