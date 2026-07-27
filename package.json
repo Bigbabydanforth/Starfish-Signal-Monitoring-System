@@ -4,5 +4,11 @@
   "private": true,
   "engines": {
     "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "airtable": "^0.12.2",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
   }
 }
