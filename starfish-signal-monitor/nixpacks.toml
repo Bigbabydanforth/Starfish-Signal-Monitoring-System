@@ -19,5 +19,14 @@ aptPkgs = [
   "libxtst6",
   "xdg-utils",
   "ca-certificates",
-  "wget"
+  "wget",
+  "unzip",
+  "chromium-browser"
 ]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[variables]
+PUPPETEER_SKIP_DOWNLOAD = "true"
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium-browser"
