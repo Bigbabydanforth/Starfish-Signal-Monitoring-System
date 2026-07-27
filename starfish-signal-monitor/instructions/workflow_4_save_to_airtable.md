@@ -41,7 +41,7 @@ Function: `getKnownDomain()` from `utils/known_domains.js`
 - **Tier 1 (AL perfect contact):** If AudienceLab provided a person with a matching title AND email → use immediately, no further search.
 - **Tier 2 (Find ONE marketing person):** Search Hunter domain search for one marketing/brand decision-maker. Try Apollo BSI search if Hunter finds nothing. Contacts must have email OR LinkedIn to proceed (unreachable contacts are dropped). **The found contact must pass the BSI strict title filter** (see below) — if their title is not a Starfish target role, they are dropped and the waterfall falls through to Tier 3.
 - **Tier 3 (Broadcast to 5 senior leaders):** If no single contact found, build a list of up to 5 senior executives (CEO, COO, President, CMO, VP Marketing) for broadcast outreach. Each gets their own Airtable record with `send_day: 1–5` for staggered sending. Unreachable contacts (no email, no LinkedIn) are dropped. **Before saving, every contact in the broadcast list is run through the BSI strict title filter** — contacts with irrelevant titles are dropped (logged as `[BSI/TitleFilter] ⛔ Dropping irrelevant title`).
-- **Tier 4 (Contact Needed):** If all tiers fail (including if Tier 3's title filter drops all contacts), signal is flagged `bsi_contact_needed: true` and routed to the "Research Needed" section of the email for Carly to handle manually.
+- **Tier 4 (Contact Needed):** If all tiers fail (including if Tier 3's title filter drops all contacts), signal is flagged `bsi_contact_needed: true` and routed to the "Research Needed" section of the email for manual handling.
 
 **BSI Strict Title Filter (`isBSIAllowedTitle`):**
 Only contacts with titles matching Starfish's target roles are allowed through. The allowed list covers:
@@ -56,7 +56,14 @@ Any contact whose title does not match one of these patterns is dropped before r
 
 **Non-BSI email cascade:** Each non-BSI signal goes through these steps in order. Steps only run if the previous one returned no result.
 
-**Email validation:** All discovered emails are validated through `isFakeEmail()` from `utils/email_validator.js`. This rejects:
+**Email validation:** All discovered emails are validated through `verifyEmail()` from `utils/email_validator.js`, a major upgrade from the legacy `isFakeEmail()` function.
+`verifyEmail()` provides robust validation by:
+- Handling Apollo's "free" status correctly vs verified emails.
+- Using Hunter's person-finder as a fallback check for ambiguous emails.
+- Leveraging strict Puppeteer domain validation for scraped emails.
+- Distinguishing between perfectly valid emails and "flagged" emails (`email_flagged: true`) which are risky but kept under a fail-open policy.
+
+It continues to reject bad patterns:
 - Fake/placeholder patterns (john.doe@, firstname.lastname@, example@, test@)
 - Generic inbox prefixes (noreply, support, info, hello, contact, press, media, etc.)
 - Personal/free email domains (gmail.com, yahoo.com, etc.)

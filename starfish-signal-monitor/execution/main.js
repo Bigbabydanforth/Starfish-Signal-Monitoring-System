@@ -17,6 +17,8 @@ import sendEmail from './workflow_5_send_email.js';
 import sendTelegramMonitoring from './workflow_6_telegram_monitoring.js';
 import { closeBrowser } from './utils/puppeteer_email_finder.js';
 import { resetAllBreakers } from './utils/circuit_breaker.js';
+import { validateRoutingTable } from '../hubspot/sequenceRouting.js';
+import { pushPendingSignals }   from '../hubspot/pushPendingSignals.js';
 
 // --- Full-run Log File ---
 // Mirrors every console.log/warn/error to .tmp/run_log_YYYYMMDD_HHMMSS.txt
@@ -83,6 +85,27 @@ if (missingRequired.length > 0) {
 const missingOptional = OPTIONAL_WARN_VARS.filter(k => !process.env[k]);
 if (missingOptional.length > 0) {
   console.warn(`[Startup] WARNING — Optional env vars not set (some signal sources will be skipped):\n  ${missingOptional.join('\n  ')}`);
+}
+
+// Validate HubSpot sequence routing table — logs warnings for missing IDs, does not throw.
+validateRoutingTable();
+
+// Log current soft-launch throttle state so Railway logs make it immediately visible.
+// Caps must match enrollmentQueue.js: Week 1 = 50, Week 2 = 300, Week 3+ = 900.
+{
+  const LAUNCH_DATE_ENV = process.env.LAUNCH_DATE ? new Date(process.env.LAUNCH_DATE) : null;
+  if (LAUNCH_DATE_ENV && !isNaN(LAUNCH_DATE_ENV.getTime())) {
+    const daysSinceLaunch = Math.floor((new Date() - LAUNCH_DATE_ENV) / (1000 * 60 * 60 * 24));
+    let cap;
+    if (daysSinceLaunch < 7)       cap = 50;   // Week 1 pilot
+    else if (daysSinceLaunch < 14) cap = 300;  // Week 2 ramp
+    else                           cap = 900;  // Full production
+    console.log(`[Startup] Launch day ${daysSinceLaunch} — enrollment cap: ${cap}/run (${
+      daysSinceLaunch < 7 ? 'pilot' : daysSinceLaunch < 14 ? 'ramp' : 'production'
+    })`);
+  } else {
+    console.log(`[Startup] LAUNCH_DATE not set — enrollment cap: 900/run (full production)`);
+  }
 }
 
 const TMP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.tmp');
@@ -172,6 +195,7 @@ async function runAllWorkflows() {
   let deduplicatedSignals = [];
   let totalInserted = 0;
   let emailSuccess = false;
+  let pdlPagination = null;
 
   // M6: outer try/finally guarantees isRunning always resets, even if an unexpected throw
   // escapes one of the inner catch blocks (e.g. a monkey-patched console.error in tests)
@@ -183,6 +207,7 @@ async function runAllWorkflows() {
       const fetchResult = await fetchSignals();
       allSignals = fetchResult.signals;
       audienceLabPendingCursor = fetchResult.audienceLabPendingCursor;
+      pdlPagination = fetchResult.pdlPagination || null;
       console.log(`[${new Date().toISOString()}] Workflow 1 complete: ${allSignals.length} raw signals`);
 
       // Workflow 2: Filter + Claude enrichment
@@ -231,7 +256,7 @@ async function runAllWorkflows() {
     // Workflow 6: Telegram monitoring — always runs, even after errors
     try {
       console.log(`\n[${new Date().toISOString()}] --- Workflow 6: Telegram Monitoring ---`);
-      await sendTelegramMonitoring(deduplicatedSignals, totalInserted, emailSuccess, startTime);
+      await sendTelegramMonitoring(deduplicatedSignals, totalInserted, emailSuccess, startTime, pdlPagination);
     } catch (err) {
       // Should never throw (telegram_client catches internally), but belt-and-suspenders
       console.error('[Telegram] Unexpected error in monitoring workflow:', err.message);
@@ -256,9 +281,9 @@ async function runAllWorkflows() {
   }
 }
 
-// --- Cron Schedule: 5:00 AM EST daily ---
+// --- Cron Schedule: 5:00 AM EST — Monday, Wednesday, Thursday only ---
 
-const cronSchedule = process.env.CRON_SCHEDULE || '0 5 * * *';
+const cronSchedule = process.env.CRON_SCHEDULE || '0 5 * * 1,3,4';
 
 // Maximum time a single pipeline run is allowed before it is considered hung.
 // If the pipeline exceeds this, the cron guard fires a Telegram alert and
@@ -299,6 +324,37 @@ if (!process.argv.includes('--test') && !process.argv.includes('--manual')) {
     timezone: 'America/New_York'
   });
   console.log(`[Cron] Scheduled: "${cronSchedule}" (America/New_York)`);
+
+  // --- HubSpot Push Cron: 6 AM EST — Tuesday, Wednesday, Thursday only ---
+  // Pipeline fetches signals Mon/Wed/Thu at 5 AM. Contacts are pushed to HubSpot
+  // one hour later at 6 AM on Tue/Wed/Thu:
+  //   Monday pipeline    → pushed Tuesday 6 AM
+  //   Wednesday pipeline → pushed Wednesday 6 AM (same day, 1hr after fetch)
+  //   Thursday pipeline  → pushed Thursday 6 AM (same day, 1hr after fetch)
+  //
+  // AUTO_PUSH_TO_HUBSPOT must be 'true' for live pushes. Dry-run otherwise.
+  let isPushing = false;
+  cron.schedule('0 6 * * 2,3,4', async () => {
+    if (isPushing) {
+      console.log(`[${new Date().toISOString()}] HubSpot push already running — skipping this trigger`);
+      return;
+    }
+    isPushing = true;
+    console.log(`[${new Date().toISOString()}] HubSpot push cron triggered`);
+    const dryRun = process.env.AUTO_PUSH_TO_HUBSPOT !== 'true';
+    try {
+      await pushPendingSignals({ dryRun });
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] HubSpot push error:`, err.message);
+    } finally {
+      isPushing = false;
+    }
+  }, {
+    timezone: 'America/New_York'
+  });
+  console.log(`[Cron] HubSpot push scheduled: "0 6 * * 2,3,4" Tue/Wed/Thu (America/New_York)`);
+  console.log(`[Cron] Push mode: ${process.env.AUTO_PUSH_TO_HUBSPOT === 'true' ? 'LIVE' : 'DRY-RUN (set AUTO_PUSH_TO_HUBSPOT=true to enable)'}`);
+
 } else {
   console.log(`[Cron] Test/manual mode — cron NOT registered (one-shot run only)`);
 }

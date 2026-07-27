@@ -36,7 +36,7 @@ function formatSignalDetails(signal) {
     // signal.person is always null for BSI after the broadcast rewrite, so this is a company-level fallback only.
     return `${signal.company?.name || 'Company'} is actively researching brand strategy online.`;
   }
-  if (signal.type === 'News/Press' && signal.article?.title) {
+  if ((signal.type === 'News/Press' || signal.type === 'Funding') && signal.article?.title) {
     return signal.article.title + (signal.article.description ? '. ' + signal.article.description : '');
   }
   if (signal.type === 'M&A Activity' && signal.deal) {
@@ -226,7 +226,9 @@ function buildSignalCard(signal) {
     signal_details: formatSignalDetails(signal),
     brief:          signal.brief,
     industry:       signal.company.industry || 'Unknown',
-    source_url:     signal.source_url || '#'
+    source_url:     signal.source_url || '#',
+    bespoke:        signal.bespoke === true,
+    bespoke_reason: signal.bespoke_reason || ''
   };
 
   if (contacts.length > 0) {
@@ -240,25 +242,61 @@ function buildSignalCard(signal) {
   return card;
 }
 
+// buildBespokeCard — simpler shape for the bespoke email section.
+// Reuses buildSignalCard() for contacts, then flattens to a single contact_info string
+// since the bespoke template section shows raw text, not a formatted contacts table.
+function buildBespokeCard(signal) {
+  const card = buildSignalCard(signal);
+  let contactInfo = '';
+  if (card.contacts?.length > 0) {
+    contactInfo = card.contacts.map(c => `${c.name} (${c.title}) — ${c.contact_str}`).join('; ');
+  } else if (card.contact_needed) {
+    contactInfo = 'No contact identified — manual research required';
+  }
+  return {
+    company_name:   card.company_name,
+    signal_type:    card.signal_type,
+    priority:       signal.priority || 'HIGH',
+    signal_details: card.signal_details,
+    bespoke_reason: card.bespoke_reason || '',
+    brief:          card.brief || '',
+    contact_info:   contactInfo,
+    industry:       card.industry || 'Unknown',
+    source_url:     card.source_url || '#',
+  };
+}
+
 async function sendEmailWorkflow(deduplicatedSignals) {
   const today = getTodayStamp();
 
-  // Step 5.1: Build all cards first, then split into "Ready to Contact" vs "Research Needed".
+  // Step 5.1: Separate bespoke signals first — they appear in their own section at the top
+  // of the email and do NOT also appear in the HIGH/MEDIUM/LOW buckets.
+  const bespokeRaw    = deduplicatedSignals.filter(s => s.bespoke === true);
+  const nonBespokeRaw = deduplicatedSignals.filter(s => s.bespoke !== true);
+
+  const bespokeCards  = bespokeRaw.map(s => buildBespokeCard(s));
+
+  // Build all non-bespoke cards, then split into "Ready to Contact" vs "Research Needed".
   // BSI signals where no contacts were found (bsi_contact_needed: true) go into their own
   // section at the bottom — per David's instruction (Option C). All other signals stay in
   // the HIGH / MEDIUM / LOW priority buckets as before.
-  const allCards = deduplicatedSignals.map(s => ({ ...buildSignalCard(s), _priority: s.priority }));
+  const allCards = nonBespokeRaw.map(s => ({ ...buildSignalCard(s), _priority: s.priority }));
 
   // A card needs research if no contacts were found for the signal
   const needsResearch = c => c.contact_needed;
   const readyCards          = allCards.filter(c => !needsResearch(c));
   const researchNeededCards = allCards.filter(c =>  needsResearch(c));
 
-  const highPriority   = readyCards.filter(c => c._priority === 'HIGH');
-  const mediumPriority = readyCards.filter(c => c._priority === 'MEDIUM');
-  const lowPriority    = readyCards.filter(c => c._priority === 'LOW');
+  // Funding signals get their own section — pulled out before priority grouping
+  // so they don't also appear in HIGH/MEDIUM/LOW buckets.
+  const fundingCards   = readyCards.filter(c => c.signal_type === 'Funding');
+  const nonFunding     = readyCards.filter(c => c.signal_type !== 'Funding');
 
-  console.log(`[Email] Signals — HIGH: ${highPriority.length}, MEDIUM: ${mediumPriority.length}, LOW: ${lowPriority.length}, Research Needed: ${researchNeededCards.length}`);
+  const highPriority   = nonFunding.filter(c => c._priority === 'HIGH');
+  const mediumPriority = nonFunding.filter(c => c._priority === 'MEDIUM');
+  const lowPriority    = nonFunding.filter(c => c._priority === 'LOW');
+
+  console.log(`[Email] Signal breakdown — Bespoke: ${bespokeCards.length}, Funding: ${fundingCards.length}, HIGH: ${highPriority.length}, MED: ${mediumPriority.length}, LOW: ${lowPriority.length}, Research Needed: ${researchNeededCards.length}`);
 
   // Step 5.2: Load and populate template
   const templatePath = path.join(__dirname, '..', 'templates', 'email_template.html');
@@ -271,15 +309,19 @@ async function sendEmailWorkflow(deduplicatedSignals) {
   const templateData = {
     DATE:                    dateFormatted,
     TOTAL_COUNT:             deduplicatedSignals.length,
+    BESPOKE_COUNT:           bespokeCards.length,
     HIGH_COUNT:              highPriority.length,
     MEDIUM_COUNT:            mediumPriority.length,
     LOW_COUNT:               lowPriority.length,
+    FUNDING_COUNT:           fundingCards.length,
     RESEARCH_NEEDED_COUNT:   researchNeededCards.length,
     AIRTABLE_LINK:           airtableLink,
     NO_SIGNALS:              deduplicatedSignals.length === 0,
+    BESPOKE_SIGNALS:         bespokeCards,
     HIGH_SIGNALS:            highPriority,
     MEDIUM_SIGNALS:          mediumPriority,
     LOW_SIGNALS:             lowPriority,
+    FUNDING_SIGNALS:         fundingCards,
     RESEARCH_NEEDED_SIGNALS: researchNeededCards
   };
 
@@ -290,7 +332,7 @@ async function sendEmailWorkflow(deduplicatedSignals) {
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const recipients = (nodeEnv === 'production'
     ? (process.env.EMAIL_TO_PRODUCTION || '').split(',').map(e => e.trim()).filter(Boolean)
-    : [process.env.EMAIL_TO_TESTING].filter(Boolean)
+    : (process.env.EMAIL_TO_TESTING || '').split(',').map(e => e.trim()).filter(Boolean)
   ).filter(e => {
     if (EMAIL_REGEX.test(e)) return true;
     console.warn(`[Email] Skipping invalid address: "${e}" — fix EMAIL_TO_${nodeEnv.toUpperCase()} in .env`);
@@ -502,6 +544,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         company:            { name: primary.fields['Company Name'] || '', industry: primary.fields['Industry'] || '' },
         type:               primary.fields['Signal Type']    || 'News/Press',
         priority:           primary.fields['Priority']       || 'MEDIUM',
+        bespoke:            primary.fields['Bespoke'] === true,
+        bespoke_reason:     primary.fields['Bespoke Reason'] || '',
         brief:              primary.fields['Brief']          || '',
         source_url:         primary.fields['Source URL']     || '#',
         signal_details_raw: primary.fields['Signal Details'] || '',

@@ -34,7 +34,7 @@ const PAGE_SIZE     = 100;
 // Website Visitors are high-value but capped to avoid swamping the pipeline on busy days.
 // Brand Strategy Intent leads are capped to keep Claude enrichment costs predictable.
 // Any records not processed today will re-appear tomorrow and be picked up then.
-const MAX_PIXEL_PER_RUN = Number(process.env.AUDIENCELAB_MAX_PIXEL_PER_RUN) || 300;
+// Pixel has no per-run cap — all pages are loaded every run (see fetchAudienceLabSignals).
 const MAX_LEADS_PER_RUN = Number(process.env.AUDIENCELAB_MAX_LEADS_PER_RUN) || 200;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -225,19 +225,18 @@ async function fetchAudienceLabSignals() {
   let nextLeadsPage = cursor.leads_start_page;
 
   // ── Pixel segment — Website Visitors ───────────────────────────────────────
+  // Pixel always loads ALL pages from page 1 on every run — no cursor, no cap.
+  // We deduplicate against Airtable (90-day window) instead of using a cursor.
+  // This ensures we never miss a new visitor just because the cursor advanced past them.
   if (SEGMENT_PIXEL) {
-    const { records: pixelRecords, nextPage: afterPixel } = await fetchFromPage(
-      SEGMENT_PIXEL, 'Pixel', cursor.pixel_start_page, MAX_PIXEL_PER_RUN
+    const { records: pixelRecords } = await fetchFromPage(
+      SEGMENT_PIXEL, 'Pixel', 1, 9999
     );
-    nextPixelPage = afterPixel;
+    nextPixelPage = 1; // always reset to 1 — pixel never uses cursor
     let pixelSkipped = 0;
 
     for (let pixelIdx = 0; pixelIdx < pixelRecords.length; pixelIdx++) {
       const record = pixelRecords[pixelIdx];
-      if (pixelAdded >= MAX_PIXEL_PER_RUN) {
-        pixelSkipped += pixelRecords.length - pixelIdx;
-        break;
-      }
       const companyName = (record.COMPANY_NAME || '').trim();
       if (!companyName) { pixelSkipped++; continue; }
 

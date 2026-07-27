@@ -13,6 +13,7 @@ async function fetchSignals() {
 
   let apolloSignals         = [];
   let pdlSignals            = [];
+  let pdlPagination         = null;
   let mediaStackSignals     = [];
   let predictLeadsSignals   = [];
   let newsApiSignals        = [];
@@ -34,7 +35,7 @@ async function fetchSignals() {
     {
       name: 'PDL',
       fn: fetchPDLSignals,
-      onSuccess: (res) => { pdlSignals = res; },
+      onSuccess: (res) => { pdlSignals = res.signals; pdlPagination = res.pdlPagination; },
       onFailure: (err) => {
         console.error('[PDL Source] API call failed:', err.message);
         fs.appendFileSync(`.tmp/error_log_${today}.txt`,
@@ -120,7 +121,7 @@ async function fetchSignals() {
     } catch (_) { /* alert failure must never crash the pipeline */ }
   }
 
-  return { signals: allSignals, audienceLabPendingCursor };
+  return { signals: allSignals, audienceLabPendingCursor, pdlPagination };
 }
 
 export default fetchSignals;
@@ -146,7 +147,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
 
     try {
-      pdlSignals = await fetchPDLSignals();
+      const pdlResult = await fetchPDLSignals();
+      pdlSignals = pdlResult.signals;
     } catch (err) {
       console.error('[PDL] fetch failed:', err.message);
     }

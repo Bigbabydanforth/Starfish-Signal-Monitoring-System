@@ -11,7 +11,7 @@
 import { query, deleteRecords } from '../execution/utils/airtable_client.js';
 
 const LIVE = process.argv.includes('--live');
-const TARGET_DATE = '2026-07-15'; // July 15, 2026
+const TARGET_DATE = new Date().toISOString().split('T')[0]; // today's date, e.g. 2026-07-21
 
 console.log('────────────────────────────────────────────────────────────');
 console.log(`DELETE TODAY'S SIGNALS — Date Detected = ${TARGET_DATE}`);

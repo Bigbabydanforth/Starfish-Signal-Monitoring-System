@@ -5,12 +5,16 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import rateLimit from 'express-rate-limit'
+import compression from 'compression'
 
 import signalsRouter  from './routes/signals.js'
 import hubspotRouter  from './routes/hubspot.js'
 import contactsRouter from './routes/contacts.js'
 
 const app = express()
+
+// Gzip all responses — compresses JSON ~85–90%, turning a 6MB signals payload into ~500KB
+app.use(compression())
 
 const allowedOrigins = [
   'http://localhost:5173',

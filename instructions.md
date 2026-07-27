@@ -16,11 +16,11 @@ There are two important files:
 
 The agent must follow both.
 
-**Project:** Starfish Intent Signal Monitoring System (Pilot)  
+**Project:** Starfish Intent Signal Monitoring System (Full Production Build)  
 **Client:** Starfish Co. (David Kessler, Zack Kessler)  
-**Budget:** $1,500 USD  
-**Timeline:** 10 business days  
-**Purpose:** Automated daily system that monitors 6 data sources (PDL, Apollo, MediaStack, PredictLeads, NewsAPI, AudienceLab) for companies showing "intent signals" that indicate they might need branding/marketing services. System filters for qualified companies ($50M+ revenue OR Series A+ funding, 250+ employees, US-based, excluding government entities and non-profits), removes duplicates, verifies PDL signals via Telegram, scores priority with Claude API, saves to Airtable, syncs to a client-facing Google Sheet, and sends daily email digest at 5:00 AM EST.
+**Budget:** $6,500 USD  
+**Timeline:** Full Production Delivery  
+**Purpose:** Automated daily system that monitors 6 data sources (PDL, Apollo, MediaStack, PredictLeads, NewsAPI, AudienceLab) for companies showing "intent signals" that indicate they might need branding/marketing services. System filters for qualified companies ($50M+ revenue OR Series A+ funding, 250+ employees, US-based, excluding government entities and non-profits), removes duplicates, verifies PDL signals via Telegram, scores priority with Claude API, saves to Airtable, syncs to a client-facing Google Sheet, provides a React Signal Dashboard with 1-click HubSpot CRM integration, and sends daily email digest at 5:00 AM EST.
 
 ---
 
@@ -182,6 +182,7 @@ Do not run code unless both exist.
    - PredictLeads fetches M&A + Rebrand events with pagination (up to 3 pages per category, 450 max events). ML architecture fix confirmed zero repeated IDs.
    - NewsAPI is reliable M&A + funding + job change press release source (6 queries: 3 M&A/funding + 3 job change press release queries restricted to wire services).
    - MediaStack uses HTTPS (paid plan), ~30 keyword queries for rebrand, funding, M&A, and job change press releases.
+   - AudienceLab fetches Website Visitor and Brand Strategy Intent signals (capped at 300 Pixel and 200 Leads per run). Pagination cursors are saved to `RAILWAY_VOLUME_MOUNT_PATH` to persist across runs.
    - Saves raw responses to `.tmp/`
    - Returns combined array of raw signals
 
@@ -191,22 +192,28 @@ Do not run code unless both exist.
    - Non-profit/charity filter (drops missionary unions, charities, foundations, churches)
    - Revenue/funding size filter ($50M+ OR Series A+). Rebrand signals bypass. PDL auto-passes when Apollo returns no revenue (PDL SQL already confirmed $50M+).
    - Employee count filter (250+ minimum, benefit of doubt when missing)
-   - Job title filter (Job Change only; PDL gets keyword check; CCO/Chief Communications Officer added)
+   - Job title filter (Job Change only; PDL gets keyword check; CCO/Chief Communications Officer added). Strict BSI filtering rules are applied to ensure only valid marketing roles (or C-Suite fallbacks) pass.
    - Start date filter (Job Change only; must be within 90 days)
-   - Geography filter (US-based HQ)
+   - Geography filter (US-based HQ, with secondary checks for foreign currency and compound TLDs like .com.au)
    - Apollo geo-verification (API call for signals with missing country data)
    - News job change check (enriches job change articles via Apollo for revenue/location)
    - M&A revenue verification (at least one party must be $50M+; receives_financing gets free pass)
-   - Claude enrichment (most expensive, runs last — adds priority, brief, contact_approach)
+   - M&A Apollo Executive Lookup (`fetchMaCSuite`) fetches top C-Suite or marketing executives for the acquiring company so Starfish knows who to contact.
+   - Claude enrichment (adds priority, brief, contact_approach, and **bespoke signal flag** with `bespoke_reason` for Fortune 100 / $1B+ deals requiring handcrafted executive outreach)
+   - News/Press reclassification: A3 separates Funding rounds into `Funding` signal type; A4 reclassifies executive appointment press releases into `Job Change`
    - Returns filtered + enriched signals
 
 3. **workflow_3_deduplicate.md + workflow_3_deduplicate.js**
-   - Filters garbage names from news feeds
-   - Merges within-batch duplicates (boosts priority if seen 2+ times)
-   - Loads signals from Airtable for the last 90 days (rolling window — no maxRecords cap). Uses `getDateDaysAgo(91)` because IS_AFTER is exclusive (strictly greater than), so 91 days ensures the 90-day boundary is included.
-   - Fires Telegram alerts at 4,500 (warning) and 5,000 (critical) records
-   - Removes duplicates based on normalized company name
-   - Returns deduplicated signals
+   - Filter garbage names (drops headlines / non-company strings)
+   - Merge duplicates within incoming batch (grouped by normalized company name AND signal type)
+   - Query Airtable `Signals` table for records from the last 90 days (using `IS_AFTER` with 91 days)
+   - No maxRecords cap — paginates through full database automatically
+   - Deduplication cap alert: Telegram alert at 4,500 and 5,000 records
+   - Normalize company names (lowercase, strip non-alphanumeric)
+   - Check incoming signals against recent Airtable names AND perform within-batch domain deduplication (`acceptedDomains`)
+   - On Airtable query failure: retry once, then pass all signals through + Telegram alert
+   - Saves final deduplicated signals and audit trail of removed duplicates to `.tmp/`
+   - Returns array of unique signals
 
 3b. **workflow_3b_verify_pdl.md + workflow_3b_verify_pdl.js**
    - Runs immediately after Workflow 3 (deduplication)
@@ -219,13 +226,12 @@ Do not run code unless both exist.
 4. **workflow_4_save_to_airtable.md + workflow_4_save_to_airtable.js**
    - Apollo company enrichment (with per-run Map cache to prevent duplicate API calls)
    - KNOWN_DOMAINS map checked before Apollo (instant, no API call)
-   - Circuit breakers on all Apollo + Hunter API calls (3 failures → OPEN, 5 min reset). 401, 429, and **422** do NOT trip the breaker — 422 means "not in database", not an outage.
-   - BSI 4-tier contact waterfall: AL perfect contact → find one marketing person → broadcast 5 senior leaders → Contact Needed (Carly)
-   - **BSI strict title filter (`isBSIAllowedTitle`)**: All BSI contacts (T2 and T3) must have a Starfish target title (CMO/VP Marketing/Director Marketing/etc.) — non-matching titles are dropped before Airtable.
-   - BSI broadcast: up to 5 contacts, each gets its own Airtable record with Send Day 1–5
-   - **7-step email enrichment cascade for non-BSI**: Apollo always first — (1) Apollo people/match [Job Change], (2) Puppeteer domain discovery, (3) Hunter email-finder [Job Change], **(4) Apollo exec search + Hunter person-finder [News/Press — new]**, (5) Hunter domain-search [News/Press & M&A], (6) Hunter pattern+verify, (7) Puppeteer web scraping
-   - isFakeEmail() validation on all discovered emails (shared in utils/email_validator.js)
-   - Formats signals for Airtable schema (6 signal types: Job Change, News/Press, M&A Activity, Rebrand, Website Visitor, Brand Strategy Intent)
+   - **Universal Broadcast Search (A1)**: Runs `findBroadcastContacts()` for ALL signal types (Job Change, M&A, Rebrand, News/Press, Website Visitor, BSI) to fetch up to 4 senior leaders per company. M&A signals run broadcast search at BOTH acquiring and acquired companies.
+   - **Send Day Assignment (A2)**: `getSendDay()` assigns staggered outreach schedules (Day 1: CMO/VP, Day 2: CEO, Day 3: COO, Day 4: Director, Day 5: Comms). Saved to Airtable `Send Day`, pushed to HubSpot `send_day`, and badged in email digest.
+   - **Domain Validation Enforcement (A8)**: `isEmailDomainValid()` handles country-code TLD edge cases (rejects `@sunlife.com.ph` for `sunlife.com`) and is enforced at every contact-save path.
+   - **Extended Title & MLM Filter (A9)**: `REJECTED_TITLE_WORDS` expanded; `isEmploymentStatusRejected()` drops job-seekers ("Open to Work", "Freelance"); `isMLMDistributor()` drops inflated ranks at direct-sales companies.
+   - **Name Completeness Check (A11)**: `isNameComplete()` drops single-letter initials (e.g. "Adeline H") and placeholder names ("Unknown", "N/A") before saving.
+   - Formats signals for Airtable schema (6 signal types + Funding)
    - Batch inserts to Airtable (max 10 per batch, individual fallback on batch failure)
    - 30s timeout on all Airtable write operations
    - Verifies insertion success
@@ -570,7 +576,7 @@ Test before moving on.
 Reliable systems are built intentionally.
 
 **For Starfish:**
-- This system handles money ($1,500 pilot → $6,500 full build)
+- This system handles production software ($6,500 Full Build)
 - This system runs in production for a real client
 - This system must work reliably for 3+ days before handoff
 - One bug or crash could lose the full build opportunity
@@ -602,7 +608,7 @@ Reliable systems are built intentionally.
 This section covers the Starfish Signal Dashboard — a separate React application that connects to the existing signal monitor data. The signal monitor (Part 1) is already built and running. Do NOT modify it as part of the dashboard build.
 
 **Project:** Starfish Signal Dashboard (MVP)
-**Users:** Carly, David, Zack (internal Starfish Co. team)
+**Users:** David, Zack, Andrew, Cole (internal Starfish Co. team)
 **Purpose:** Review AI-detected intent signals, manage outreach status, and push contacts directly to HubSpot from a branded internal tool.
 **Branch:** `react-dashboard` (separate from `main` which runs the signal monitor)
 
@@ -732,7 +738,7 @@ server/
 
 Think of the app like a series of requests and responses:
 
-1. Carly visits a page or clicks a button — that's the **input**
+1. A team member visits a page or clicks a button — that's the **input**
 2. A React component calls the Express API via Axios
 3. The Express route queries **Airtable** (for signals) or calls HubSpot
 4. The result comes back to React — that's the **output**
@@ -780,7 +786,7 @@ Think of the app like a series of requests and responses:
 
 **RLS policy for signals table:**
 - Only the service-role key (used by the Express backend) can read/write signals
-- Authenticated Supabase users (Carly, David, Zack) can NOT read signals directly — they must go through the API
+- Authenticated Supabase users (David, Zack, Andrew, Cole) can NOT read signals directly — they must go through the API
 - This keeps the signal data secure even if someone inspects browser network calls
 
 ---
@@ -862,7 +868,7 @@ These phases follow on from the signal monitor phases (Phases 1–8 above). Buil
 2. Create `signals` table matching the Airtable schema (15 fields + `hubspot_pushed` boolean + `status` field)
 3. Enable RLS on signals table
 4. Create RLS policy: service-role key can read/write, authenticated users cannot read directly
-5. Create Supabase Auth users for Carly, David, Zack
+5. Create Supabase Auth users for David, Zack, Andrew, Cole
 6. Test: verify authenticated user CANNOT query signals table directly from browser
 7. Test: verify service-role key CAN query signals table from Node.js
 
@@ -949,7 +955,7 @@ These phases follow on from the signal monitor phases (Phases 1–8 above). Buil
 3. Right: white card — "Welcome back." greeting, email field (Enter → focus password), password field with eye-toggle SVG (position: absolute, 44px padding-right), error mapping to friendly messages, CSS spinner in button during loading, "This is a private system." footer note
 4. Mobile: left column `display: none`, card fills screen
 5. `index.html` updated to include Inter weight 300 (Light) in Google Fonts import
-6. Three Supabase users added: david@, zack@, carly@starfishco.com
+6. Four Supabase users: david@, zack@, andrew@, cole@starfishco.com
 
 **Phase 15: Dashboard Deployment**
 1. Deploy Express backend to Railway (same project as signal monitor)
@@ -958,7 +964,7 @@ These phases follow on from the signal monitor phases (Phases 1–8 above). Buil
 4. Add env vars to Vercel: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_URL` (set to Railway backend URL)
 5. Update `FRONTEND_URL` in Railway to the Vercel deployment URL (for CORS)
 6. Test full flow on production: `/` landing → `/login` → `/signals` → signal detail → status update → HubSpot push
-7. Confirm Carly, David, Zack can all log in
+7. Confirm David, Zack, Andrew, Cole can all log in
 
 ---
 

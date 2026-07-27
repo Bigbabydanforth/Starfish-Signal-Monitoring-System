@@ -37,6 +37,21 @@ function mapRecord(record) {
     hubspot_pushed: record.get('HubSpot Pushed') || false,
     send_day: record.get('Send Day') || null,
     created_at: record.get('Created At') || null,
+    acquired_company: record.get('Acquired Company') || null,
+    bespoke: record.get('Bespoke') === true,
+    bespoke_reason: record.get('Bespoke Reason') || '',
+    // Claude email generation fields
+    claude_generated:    record.get('Claude Generated') === true,
+    claude_generated_at: record.get('Claude Generated At') || null,
+    ab_test_group:       record.get('AB Test Group') || null,
+    email_1_subject:     record.get('Email 1 Subject') || null,
+    email_1_body:        record.get('Email 1 Body') || null,
+    email_2_body:        record.get('Email 2 Body') || null,
+    email_3_body:        record.get('Email 3 Body') || null,
+    email_4_body:        record.get('Email 4 Body') || null,
+    email_5_body:        record.get('Email 5 Body') || null,
+    email_6_body:        record.get('Email 6 Body') || null,
+    email_7_body:        record.get('Email 7 Body') || null,
   }
 }
 
@@ -172,6 +187,26 @@ export async function updateHubspotPushed(id) {
 
 export async function updateContactInfo(id, contactInfo) {
   await base(TABLE).update(id, { 'Contact Info': contactInfo })
+  signalsCache.clear()
+  bsiCache.clear()
+}
+
+export async function updateAcquiredCompany(id, acquiredCompany) {
+  await base(TABLE).update(id, { 'Acquired Company': acquiredCompany })
+  signalsCache.clear()
+  bsiCache.clear()
+}
+
+// updateSignalField — used by PATCH /api/signals/:id/field (inline edit on Signal Detail)
+// Allowlisted field names only — never write arbitrary field names to Airtable.
+export async function updateSignalField(id, fieldName, value) {
+  const FIELD_MAP = {
+    industry:         'Industry',
+    acquired_company: 'Acquired Company',
+  }
+  const airtableField = FIELD_MAP[fieldName]
+  if (!airtableField) throw new Error(`Unknown field: ${fieldName}`)
+  await base(TABLE).update(id, { [airtableField]: value })
   signalsCache.clear()
   bsiCache.clear()
 }

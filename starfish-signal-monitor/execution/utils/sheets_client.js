@@ -58,19 +58,10 @@ function recordToRow(record) {
   ];
 }
 
-// ── Get the next empty data row number ───────────────────────────────────────
-// Counts how many data rows already exist (from row 5 down) in column A.
-async function getNextEmptyRow(sheets, sheetId) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range:         `${SHEET_NAME}!A${DATA_START_ROW}:A`
-  });
-  const existingRows = res.data.values || [];
-  return DATA_START_ROW + existingRows.length;
-}
-
 // ── Append rows to the sheet (used by daily pipeline) ────────────────────────
-// Appends new records after the last existing data row, starting at row 5+.
+// Uses spreadsheets.values.append which finds the true bottom of the sheet natively.
+// This is immune to gaps in column A (blank company names, manual edits, etc.)
+// that would cause getNextEmptyRow() to return a row that's too small and overwrite data.
 // Never touches the dashboard header rows (1–4).
 async function appendRows(records) {
   if (!process.env.GOOGLE_SHEET_ID) {
@@ -80,18 +71,17 @@ async function appendRows(records) {
   const auth    = getAuth();
   const sheets  = google.sheets({ version: 'v4', auth });
   const sheetId = process.env.GOOGLE_SHEET_ID;
-
-  const nextRow = await getNextEmptyRow(sheets, sheetId);
   const rows    = records.map(rec => recordToRow(rec));
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId:    sheetId,
-    range:            `${SHEET_NAME}!A${nextRow}`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody:      { values: rows }
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:     sheetId,
+    range:             `${SHEET_NAME}!A${DATA_START_ROW}`,
+    valueInputOption:  'USER_ENTERED',
+    insertDataOption:  'INSERT_ROWS',
+    requestBody:       { values: rows }
   });
 
-  console.log(`[Sheets] Appended ${rows.length} rows starting at row ${nextRow}`);
+  console.log(`[Sheets] Appended ${rows.length} rows`);
   return rows.length;
 }
 

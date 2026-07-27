@@ -52,7 +52,7 @@ Each signal object in the loop includes: `company_name`, `signal_type`, `signal_
 
 Signal types supported: "Job Change", "News/Press", "M&A Activity", "Rebrand", "Website Visitor", "Brand Strategy Intent".
 
-**Research Needed section:** Appears at the bottom of the email (styled in purple). Each card shows the company name, industry, website, and a note directing Carly to find the contact manually. This section only renders if `RESEARCH_NEEDED_COUNT > 0`.
+**Research Needed section:** Appears at the bottom of the email (styled in purple). Each card shows the company name, industry, website, and a note directing the team to find the contact manually. This section only renders if `RESEARCH_NEEDED_COUNT > 0`.
 
 Signal details are reconstructed from the signal object if not already built (supports merged signals, pipeline signals, and Airtable-loaded signals for the standalone runner).
 

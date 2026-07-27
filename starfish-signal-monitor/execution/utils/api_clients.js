@@ -18,6 +18,33 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TMP_DIR = resolve(__dirname, '../../.tmp');
 
+// ── PDL Scroll Token — JSON file cursor (same pattern as AudienceLab) ─────────
+// Saved to Railway volume when available, otherwise .tmp/ for local dev.
+// Survives container restarts when RAILWAY_VOLUME_MOUNT_PATH is set.
+const _pdlCursorDir   = process.env.RAILWAY_VOLUME_MOUNT_PATH || TMP_DIR;
+const PDL_CURSOR_FILE = path.join(_pdlCursorDir, 'pdl_cursor.json');
+
+function loadPDLCursor() {
+  try {
+    if (fs.existsSync(PDL_CURSOR_FILE)) {
+      return JSON.parse(fs.readFileSync(PDL_CURSOR_FILE, 'utf8'));
+    }
+  } catch { /* corrupt file — start fresh */ }
+  return { scrollToken: null, totalFetched: 0 };
+}
+
+function savePDLCursor(cursor) {
+  try {
+    if (!fs.existsSync(_pdlCursorDir)) fs.mkdirSync(_pdlCursorDir, { recursive: true });
+    fs.writeFileSync(PDL_CURSOR_FILE, JSON.stringify(cursor, null, 2));
+    if (process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+      console.log(`[PDL Source] Cursor saved to Railway volume (${PDL_CURSOR_FILE})`);
+    }
+  } catch (err) {
+    console.warn('[PDL Source] Could not save cursor file:', err.message);
+  }
+}
+
 // ─── LinkedIn URL normalization ───────────────────────────────────────────────
 // Strips protocol, www., and trailing slash so that http://www.linkedin.com/in/john/
 // and https://linkedin.com/in/john are treated as the same person.
@@ -358,7 +385,7 @@ async function fetchApolloSignals() {
 async function fetchPDLSignals() {
   if (!process.env.PDL_API_KEY) {
     console.log('[PDL Source] PDL_API_KEY not set — skipping');
-    return [];
+    return { signals: [], pdlPagination: null };
   }
 
   const todayStr      = new Date().toISOString().split('T')[0];
@@ -388,11 +415,24 @@ async function fetchPDLSignals() {
     AND location_country = 'united states'
   `.trim();
 
+  // Step 1: Load current scroll token from JSON cursor file
+  const { scrollToken, totalFetched: previousTotal } = loadPDLCursor();
+
+  // Step 2: Build params — size stays at 100 (PDL maximum).
+  // Only add scroll_token when one is available from a previous run.
+  const pdlParams = { sql: SQL, size: 100 };
+  if (scrollToken) {
+    pdlParams.scroll_token = scrollToken;
+    console.log(`[PDL Source] Using scroll token — continuing from record ${previousTotal + 1}`);
+  } else {
+    console.log(`[PDL Source] No scroll token — fetching from the beginning`);
+  }
+
   let rawResponse;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await axios.get('https://api.peopledatalabs.com/v5/person/search', {
-        params:  { sql: SQL, size: 110 },
+        params:  pdlParams,
         headers: { 'X-Api-Key': process.env.PDL_API_KEY },
         timeout: 30000
       });
@@ -512,7 +552,32 @@ async function fetchPDLSignals() {
   }
 
   console.log(`[PDL Source] Produced ${signals.length} job change signals (${skippedAirtable} already in Airtable — skipped)`);
-  return signals;
+
+  // Step 3: Save the new scroll token returned by PDL to the JSON cursor file.
+  // newScrollToken === null means end of dataset — cycle complete, next run starts from beginning.
+  const newScrollToken = rawResponse.scroll_token || null;
+  const cycleComplete  = newScrollToken === null;
+  savePDLCursor({
+    scrollToken:  cycleComplete ? null : newScrollToken,
+    totalFetched: previousTotal + people.length,
+  });
+
+  // Step 4: Telegram alert when cycle resets so Gideon knows we've looped back to the beginning.
+  if (cycleComplete) {
+    try {
+      const { sendErrorAlert } = await import('../utils/telegram_client.js');
+      await sendErrorAlert(`🔄 PDL Pagination: Full cycle complete — all ${previousTotal + people.length} records returned for this query. Next run starts from the beginning.`);
+    } catch (_) { /* alert failure must never crash the pipeline */ }
+  }
+
+  const pdlPagination = {
+    fetchedThisRun:            people.length,
+    totalFetchedAllTime:       previousTotal + people.length,
+    cycleComplete,
+    nextRunStartsFromBeginning: cycleComplete,
+  };
+
+  return { signals, pdlPagination };
 }
 
 // ─── MediaStack API ───────────────────────────────────────────────────────────
@@ -810,7 +875,8 @@ async function fetchPredictLeadsSignals() {
   const PL_PAGE_SIZE = 30;
   const PL_MAX_PAGES = 5; // 5 pages × 30 = up to 150 events (was 90 from 5 deduped queries)
 
-  const MA_CATEGORIES = new Set(['acquires', 'merges_with', 'sells_assets_to', 'receives_financing']);
+  const MA_CATEGORIES      = new Set(['acquires', 'merges_with', 'sells_assets_to']);
+  const FUNDING_CATEGORIES = new Set(['receives_financing']);
   // rebrands_to: kept for when PredictLeads does return this category.
   // Keyword detection below catches rebrand events from any category (e.g. 'launches').
   const REBRAND_CATEGORIES = new Set(['rebrands_to']);
@@ -1076,7 +1142,72 @@ async function fetchPredictLeadsSignals() {
   }
 
   console.log(`[PredictLeads] Fetched ${rebrandSignals.length} Rebrand signals`);
-  return [...signals, ...rebrandSignals];
+
+  // ── PredictLeads Funding signals (receives_financing) ─────────────────────
+  // Emitted directly as type 'Funding' — no reclassification needed at Step 2.10.
+  const fundingSignals = [];
+
+  for (const event of rawData) {
+    const attrs    = event.attributes || {};
+    const category = attrs.category   || '';
+
+    if (!FUNDING_CATEGORIES.has(category)) continue;
+
+    const foundAt = (attrs.found_at || todayStr).split('T')[0];
+    if (attrs.found_at && new Date(attrs.found_at) < cutoff) continue;
+
+    const company1Id      = event.relationships?.company1?.data?.id;
+    const includedCompany = company1Id
+      ? rawIncluded.find(r => r.type === 'company' && r.id === company1Id)
+      : null;
+    const companyAttrs    = includedCompany?.attributes || {};
+    const companyName     = companyAttrs.company_name || null;
+
+    if (!companyName) continue;
+
+    const articleId      = event.relationships?.most_relevant_source?.data?.id;
+    const includedArticle = articleId
+      ? rawIncluded.find(r => r.type === 'news_article' && r.id === articleId)
+      : null;
+    const sourceUrl      = includedArticle?.attributes?.url  || null;
+    const articleTitle   = includedArticle?.attributes?.title || attrs.summary || null;
+
+    const hqString     = companyAttrs.headquarters || companyAttrs.hq_location || null;
+    const headquarters = parseHeadquarters(hqString);
+
+    fundingSignals.push({
+      type:       'Funding',
+      source:     'PredictLeads',
+      source_url: sourceUrl,
+
+      company: {
+        name:           companyName,
+        revenue:        sanitizeRevenue(companyAttrs.annual_revenue) ?? null,
+        funding_total:  companyAttrs.total_funding  || null,
+        funding_stage:  companyAttrs.funding_stage  || null,
+        headquarters,
+        industry:       companyAttrs.industry       || null,
+        website:        companyAttrs.domain ? `https://${companyAttrs.domain}` : null,
+        employee_count: companyAttrs.employee_count || null,
+        founded_year:   companyAttrs.founded_year   || null,
+        stock_ticker:   companyAttrs.ticker         || null
+      },
+
+      article: {
+        title:        articleTitle,
+        description:  attrs.summary        || null,
+        source:       'PredictLeads',
+        category:     'Funding',
+        published_at: attrs.found_at       || null
+      },
+
+      detected_date: foundAt,
+      raw_data:      event
+    });
+  }
+
+  console.log(`[PredictLeads] Fetched ${fundingSignals.length} Funding signals`);
+  return [...signals, ...rebrandSignals, ...fundingSignals];
 }
 
 // ─── NewsAPI (M&A + Funding news) ─────────────────────────────────────────────

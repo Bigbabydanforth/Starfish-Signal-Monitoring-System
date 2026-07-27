@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import SignalTypeBadge from '../components/SignalTypeBadge'
 
 const SIGNAL_CARDS = [
@@ -15,7 +15,7 @@ const STEPS = [
   { num: 'STEP 01', title: 'Monitor',  desc: 'Six data sources run automatically at 5 AM EST: Apollo, PDL, PredictLeads, MediaStack, NewsAPI, and AudienceLab.' },
   { num: 'STEP 02', title: 'Filter',   desc: 'Signals are filtered for US-based companies with $50M+ revenue or Series A+ funding and 250+ employees.' },
   { num: 'STEP 03', title: 'Score',    desc: 'Claude AI scores each signal HIGH, MEDIUM, or LOW and writes a brief explaining why it matters to Starfish.' },
-  { num: 'STEP 04', title: 'Act',      desc: 'Carly reviews signals in this dashboard, updates status, and pushes qualified contacts directly to HubSpot.' },
+  { num: 'STEP 04', title: 'Act',      desc: 'The team reviews signals in this dashboard, updates status, and pushes qualified contacts directly to HubSpot.' },
 ]
 
 export default function Home() {

@@ -67,7 +67,7 @@ function mergeSignals(signals) {
         let detail = '';
         if (s.type === 'Job Change' && s.person) {
           detail = `${s.person.first_name || ''} ${s.person.last_name || ''} joined as ${s.person.title || 'Unknown title'}`.trim();
-        } else if (s.type === 'News/Press' && s.article) {
+        } else if ((s.type === 'News/Press' || s.type === 'Funding') && s.article) {
           detail = s.article.title || s.article.description || '';
         } else if (s.type === 'M&A Activity' && s.deal) {
           detail = `${(s.deal.type || '').replace(/_/g, ' ').toUpperCase()}: ${s.company?.name || ''}${s.deal.seller ? ` acquiring ${s.deal.seller}` : ''}`;
@@ -220,6 +220,22 @@ async function deduplicateSignals(enrichedSignals) {
   }
 
   console.log(`[Deduplication] ${enrichedSignals.length} → ${deduplicatedSignals.length} signals (removed ${garbageRemoved} garbage, ${mergedCount} merged, ${duplicatesFound.length} already in Airtable)`);
+
+  // Step 3.4b: Cross-type bespoke suppression.
+  // If a company appears in multiple signal types in the same run AND one of those signals
+  // is bespoke (manual senior outreach), suppress auto-enrollment on the non-bespoke ones.
+  // Prevents double-outreach: a company getting a handcrafted bespoke email AND being
+  // auto-enrolled into a sequence at the same time.
+  const bespokeCompanyNames = new Set();
+  for (const signal of deduplicatedSignals) {
+    if (signal.bespoke === true) bespokeCompanyNames.add(normalizeCompanyName(signal.company.name));
+  }
+  for (const signal of deduplicatedSignals) {
+    if (!signal.bespoke && bespokeCompanyNames.has(normalizeCompanyName(signal.company.name))) {
+      signal.bespoke_cross_type_suppressed = true;
+      console.log(`  [Cross-type Bespoke] ${signal.company.name} (${signal.type}) — auto-enroll suppressed, company already has a bespoke signal this run`);
+    }
+  }
 
   // Step 3.5: Save
   fs.writeFileSync(`${TMP_DIR}/final_signals_${today}.json`,         JSON.stringify(deduplicatedSignals, null, 2));

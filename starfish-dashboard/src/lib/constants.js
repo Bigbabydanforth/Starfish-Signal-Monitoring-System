@@ -10,6 +10,7 @@ export const SIGNAL_TYPES = [
   'Website Visitor',
   'News/Press',
   'Rebrand',
+  'Funding',
 ]
 
 export const PRIORITIES = ['HIGH', 'MEDIUM', 'LOW']

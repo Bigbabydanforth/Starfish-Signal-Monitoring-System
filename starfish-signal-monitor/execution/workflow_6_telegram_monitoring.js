@@ -11,20 +11,27 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
-async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailSuccess, startTime) {
+async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailSuccess, startTime, pdlPagination = null) {
   try {
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     const date     = formatDisplayDate(new Date());
 
-    const high   = deduplicatedSignals.filter(s => s.priority === 'HIGH');
-    const medium = deduplicatedSignals.filter(s => s.priority === 'MEDIUM');
-    const low    = deduplicatedSignals.filter(s => s.priority === 'LOW');
+    const high    = deduplicatedSignals.filter(s => s.priority === 'HIGH');
+    const medium  = deduplicatedSignals.filter(s => s.priority === 'MEDIUM');
+    const low     = deduplicatedSignals.filter(s => s.priority === 'LOW');
+    const funding = deduplicatedSignals.filter(s => s.type === 'Funding');
+    const bespoke = deduplicatedSignals.filter(s => s.bespoke === true);
 
     let message = `🎯 Starfish Daily Run - ${esc(date)}\n\n`;
     message += `📊 Signals Detected: ${deduplicatedSignals.length}\n`;
     message += `🔴 High Priority: ${high.length}\n`;
     message += `🟡 Medium Priority: ${medium.length}\n`;
-    message += `⚪ Low Priority: ${low.length}\n\n`;
+    message += `⚪ Low Priority: ${low.length}\n`;
+    message += `💰 Funding: ${funding.length}\n`;
+    if (bespoke.length > 0) {
+      message += `⚠️ Bespoke (manual): ${bespoke.length}\n`;
+    }
+    message += '\n';
 
     if (deduplicatedSignals.length > 0) {
       const top3 = deduplicatedSignals.slice(0, 3);
@@ -62,6 +69,26 @@ async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailS
       const flaggedCount   = nonBSI.filter(s => s.emailVerification?.flagged).length;
       const discardedCount = nonBSI.filter(s => !s.emailVerification?.valid).length;
       message += `\n📧 Emails verified: ${verifiedCount} clean, ${flaggedCount} flagged, ${discardedCount} discarded`;
+    }
+
+    // LinkedIn URL extraction health — signals where at least one LinkedIn URL was found.
+    // Checks structured fields (person.linkedin_url, broadcast contacts) and the cached
+    // Contact Info text (_contactInfo). If this is consistently 0 while Job Change signals
+    // exist, LinkedIn URL extraction is broken.
+    const contactsWithLinkedIn = deduplicatedSignals.filter(s =>
+      s.person?.linkedin_url ||
+      (s.source_url?.includes('linkedin.com')) ||
+      s.bsi_contacts?.some(c => c.linkedin_url) ||
+      s.ma_contacts?.some(c => c.linkedin_url) ||
+      (s._contactInfo?.includes('linkedin.com'))
+    ).length;
+    message += `\n🔗 LinkedIn URLs found: ${contactsWithLinkedIn} / ${deduplicatedSignals.length}`;
+
+    if (pdlPagination) {
+      message += `\n📄 PDL: ${pdlPagination.fetchedThisRun} fetched this run | ${pdlPagination.totalFetchedAllTime} total all-time`;
+      if (pdlPagination.cycleComplete) {
+        message += ` | ✅ Cycle complete — next run starts from beginning`;
+      }
     }
 
     message += `\n⏱️ Total execution time: ${duration}s`;

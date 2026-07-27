@@ -6,7 +6,7 @@ Automated daily intent signal monitoring system for Starfish Co. Monitors six ex
 
 ## Overview
 
-The system fetches data from PDL (job changes -- primary source), Apollo (job changes + company enrichment), MediaStack (news/press), PredictLeads (M&A activity -- bonus source), and NewsAPI (M&A + funding news + job change press releases). It filters for qualified companies ($50M+ revenue OR Series A+ funding, US-based), removes companies already in Airtable (full database check — no time limit), scores priority using Claude AI, saves qualified signals to Airtable, syncs to a client-facing Google Sheet, and sends a daily HTML email digest.
+The system fetches data from PDL (job changes -- primary source), Apollo (job changes + company enrichment), MediaStack (news/press), PredictLeads (M&A activity -- bonus source), NewsAPI (M&A + funding news + job change press releases), and AudienceLab (Website Visitor + Brand Strategy Intent). It filters for qualified companies ($50M+ revenue OR Series A+ funding, US-based), removes companies already in Airtable (90-day window check), scores priority using Claude AI, saves qualified signals to Airtable, syncs to a client-facing Google Sheet, and sends a daily HTML email digest.
 
 **Source notes:**
 - **PDL** is the primary job change source -- accurate start dates via SQL filtering (90-day cutoff, size 50). Loads existing Airtable LinkedIn URLs before enrichment to skip already-saved people. Titles cover: marketing CXO/VP/Director + CEO/COO/President/Chief Brand Officer.
@@ -14,11 +14,12 @@ The system fetches data from PDL (job changes -- primary source), Apollo (job ch
 - **MediaStack** monitors news/press: rebrands, brand refreshes, funding, M&A, and press releases for senior marketing/executive appointments. Expanded keyword list (~30 keywords). Uses HTTPS (paid plan).
 - **PredictLeads** tracks company M&A events (acquires, merges_with, sells_assets_to, receives_financing) and rebrands (rebrands_to). NOW PAGINATED: up to 3 pages per category (PL_PAGE_SIZE=30, PL_MAX_PAGES=3) = up to 450 events. PredictLeads confirmed their ML architecture update fixed repeated results -- verified zero repeated event IDs across 5 consecutive days. Cross-category dedup by event ID still applied.
 - **NewsAPI** is the reliable M&A, funding, and job change press release source. Runs 6 queries: M&A (domain-whitelisted), Series B/C/D funding, Series A funding, plus job change press releases (C-suite, VP/SVP, Director/Head tiers -- all restricted to PRNewswire/BusinessWire/GlobeNewswire).
+- **AudienceLab** fetches Website Visitor and Brand Strategy Intent signals. Pagination cursors are saved to `RAILWAY_VOLUME_MOUNT_PATH` for persistence across Railway container restarts. Capped at 300 Pixel and 200 Leads per run to protect rate limits and enforce intent quality.
 
 **Client:** Starfish Co. (David Kessler, Zack Kessler)
 **Developer:** Gideon Awotuyi
-**Timeline:** 10 business days (May 13-22, 2026)
-**Budget:** $1,500 USD
+**Timeline:** Full Production Build
+**Budget:** $6,500 USD
 
 ---
 
@@ -304,16 +305,10 @@ Each pipeline run generates dated files in `.tmp/`:
 | Workflow 6: Telegram Monitor | **Complete** | Silent QA alert to Gideon after each run |
 | Infrastructure | **Complete** | Railway-ready, health check at /health, cron 5 AM EST daily |
 
-### Not in Phase 1 scope (future work)
-
-- DesignRush email parser
-- React dashboard
-- HubSpot CRM integration
-- Automated test suite (Jest)
-
 ### Added post-pilot (live in production)
 
-- **AudienceLab integration** — Website Visitor + Brand Strategy Intent signals via cursor-based pagination (1,000/run). Supports separate Airtable base (`AUDIENCELAB_AIRTABLE_BASE_ID`). Timestamp strict 3-gate validation. In-memory Sheets sync path for separate-base mode.
+- **React Dashboard & HubSpot Integration** — Built full `starfish-dashboard` app with Express API backend (`server/server.js`) and React/Vite frontend. Features Supabase Auth, signal status tracking, and 1-click HubSpot contact & company push with automated pipeline sequence triggering (`hubspot/pushSignalToHubSpot.js`).
+- **AudienceLab integration** — Website Visitor + Brand Strategy Intent signals via cursor-based pagination (capped at 300 Pixel / 200 Leads per run). Cursors persisted to Railway volume. Supports separate Airtable base (`AUDIENCELAB_AIRTABLE_BASE_ID`). Timestamp strict 3-gate validation. In-memory Sheets sync path for separate-base mode.
 - **Apollo circuit breaker 422 fix** — 422 "not found" responses no longer trip the circuit breaker, ensuring small/niche companies never accidentally block the circuit.
 - **BSI strict title filter** — `isBSIAllowedTitle()` ensures only CMO/VP Marketing/Director-level marketing contacts reach Airtable from BSI signals.
 - **Apollo-first for all signal types** — News/Press now has a dedicated Apollo exec search step before Hunter domain-search.

@@ -3,6 +3,7 @@
 .env.local
 .env.production
 .env.*.local
+server/.env
 
 # Temporary files and logs
 .tmp/

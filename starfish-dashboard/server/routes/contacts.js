@@ -19,6 +19,7 @@ const VALID_SIGNAL_TYPES = [
   'Website Visitor',
   'News/Press',
   'Rebrand',
+  'Funding',
 ]
 
 const VALID_PRIORITIES = ['HIGH', 'MEDIUM', 'LOW']
@@ -33,10 +34,11 @@ const SIGNAL_TYPE_MAP = {
   'Rebrand':               'rebrand',
   'Website Visitor':       'website_visitor',
   'Brand Strategy Intent': 'brand_strategy_intent',
+  'Funding':               'funding',
 }
 
-// POST /api/contacts/add
-router.post('/add', async (req, res) => {
+// POST /api/contacts/add  (also aliased as /api/contacts/manual)
+async function handleManualContact(req, res) {
   console.log('[POST /api/contacts/add] Request received')
 
   const {
@@ -50,6 +52,7 @@ router.post('/add', async (req, res) => {
     signalType,
     priority,
     notes,
+    acquiredCompany,
   } = req.body
 
   // ── Server-side validation ────────────────────────────────────────────────
@@ -65,6 +68,9 @@ router.post('/add', async (req, res) => {
     errors.push('Company Website must start with http:// or https://')
   }
   if (notes && notes.length > 2000) errors.push('Notes must be 2,000 characters or less')
+  if (signalType === 'M&A Activity' && !acquiredCompany?.trim()) {
+    errors.push('Acquired Company is required for M&A signals')
+  }
 
   if (errors.length > 0) {
     console.log('[POST /api/contacts/add] Validation failed:', errors)
@@ -96,6 +102,9 @@ router.post('/add', async (req, res) => {
       'Contact Approach': 'Manually added — reach out directly.',
       'Source URL':      companyWebsite?.trim()   || null,
       'Status':          'New',
+      ...(signalType === 'M&A Activity' && acquiredCompany?.trim()
+        ? { 'Acquired Company': acquiredCompany.trim() }
+        : {}),
     })
     console.log(`[POST /api/contacts/add] Saved to Airtable: id=${savedRecord.id}`)
   } catch (err) {
@@ -104,19 +113,19 @@ router.post('/add', async (req, res) => {
   }
 
   // ── Step 2: Push to HubSpot ───────────────────────────────────────────────
-  if (!process.env.HUBSPOT_TOKEN) {
+  if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) {
     // HubSpot not configured — still return success since Airtable save worked
-    console.warn('[POST /api/contacts/add] HUBSPOT_TOKEN not set — skipping HubSpot push')
+    console.warn('[POST /api/contacts/add] HUBSPOT_PRIVATE_APP_TOKEN not set — skipping HubSpot push')
     return res.status(201).json({
       success: true,
       signalId: savedRecord.id,
-      hubspotWarning: 'Contact saved but HubSpot push skipped — HUBSPOT_TOKEN not configured.',
+      hubspotWarning: 'Contact saved but HubSpot push skipped — HUBSPOT_PRIVATE_APP_TOKEN not configured.',
     })
   }
 
   const headers = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${process.env.HUBSPOT_TOKEN}`,
+    'Authorization': `Bearer ${process.env.HUBSPOT_PRIVATE_APP_TOKEN}`,
   }
 
   // Search by email first to avoid duplicates.
@@ -155,9 +164,10 @@ router.post('/add', async (req, res) => {
     signal_priority:     priority,
     hubspot_pushed_date: new Date().toISOString().split('T')[0],
   }
-  if (companyWebsite?.trim()) properties.website          = companyWebsite.trim()
-  if (notes?.trim())          properties.signal_brief     = notes.trim().slice(0, 1000)
-  if (industry?.trim())       properties.company_industry = industry.trim()
+  if (companyWebsite?.trim())  properties.website          = companyWebsite.trim()
+  if (notes?.trim())           properties.signal_brief     = notes.trim().slice(0, 1000)
+  if (industry?.trim())        properties.company_industry = industry.trim()
+  if (acquiredCompany?.trim()) properties.acquired_company = acquiredCompany.trim()
 
   let hubspotRes, action
   try {
@@ -205,14 +215,22 @@ router.post('/add', async (req, res) => {
     console.error('[POST /api/contacts/add] Failed to mark hubspot_pushed in Airtable:', err.message)
   )
 
+  const hubspotContactUrl = contactId
+    ? `https://app.hubspot.com/contacts/51558018/contact/${contactId}`
+    : null
+
   console.log(`[POST /api/contacts/add] Complete: ${email} → Airtable (${savedRecord.id}) + HubSpot (${contactId}) [${action}]`)
 
   return res.status(201).json({
     success: true,
     signalId: savedRecord.id,
     hubspot_id: contactId,
+    hubspotContactUrl,
     action,
   })
-})
+}
+
+router.post('/add',    handleManualContact)
+router.post('/manual', handleManualContact)
 
 export default router

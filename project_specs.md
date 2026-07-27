@@ -2,13 +2,13 @@
 
 This document defines what we are building, as required by Step 1 of `instructions.md`.
 
-**Project:** Starfish Intent Signal Monitoring System (Pilot)  
+**Project:** Starfish Intent Signal Monitoring System (Full Production Build)  
 **Client:** Starfish Co. (David Kessler, Zack Kessler)  
-**Budget:** $1,500 USD  
-**Timeline:** 10 business days (Build: Days 1-8, Test: Days 9-10)  
+**Budget:** $6,500 USD  
+**Timeline:** Full Production System  
 **Developer:** Gideon Awotuyi  
 **Start Date:** May 13, 2026  
-**Delivery Date:** May 22, 2026
+**Delivery Date:** Production Live
 
 ---
 ## 1. Inputs
@@ -26,7 +26,7 @@ The system fetches data from five external APIs every morning at 5:00 AM EST on 
 | MediaStack | News/press monitor | Medium — requires company name extraction |
 | PredictLeads | M&A + Rebrand event tracker | High — paginated (up to 450 events), ML fix confirmed |
 | NewsAPI | Reliable M&A + funding round source | High — legal language queries on wire service whitelist |
-| AudienceLab | Website Visitor + Brand Strategy Intent | High — pre-filtered segments, cursor-based pagination (1,000/run) |
+| AudienceLab | Website Visitor + Brand Strategy Intent | High — pre-filtered segments, cursor-based pagination (capped at 300 Pixel and 200 Leads/run). Cursors saved to persistent volume. |
 
 ---
 
@@ -875,7 +875,7 @@ The size filter function runs three checks in order:
 
 **Step 2.4: Apply Geography Filter**
 
-**Filter Rule:** Company headquarters must be in United States (case-insensitive matching). Sources without country data auto-pass.
+**Filter Rule:** Company headquarters must be in United States (case-insensitive matching). Sources without country data auto-pass. Secondary checks drop foreign TLDs (.jp, .cn, .co.uk, etc.) and foreign currency indicators in signal text.
 
 **Step 2.5: Apollo Geo-Verification**
 
@@ -889,15 +889,28 @@ The size filter function runs three checks in order:
 
 **Filter Rule:** For M&A Activity signals — `receives_financing` gets a free pass; `acquires/merges_with/sells_assets_to` require at least one party at $50M+ revenue.
 
+**Step 2.7b: M&A Executive Lookup**
+
+**Filter Rule:** If an M&A signal passes revenue checks, the system queries Apollo for the acquiring company to fetch up to 5 top C-Suite or marketing executives (`fetchMaCSuite`). This prevents Starfish from receiving generic M&A signals with no actionable contact.
+
 **Step 2.8: Rebrand Priority Boost**
 
 All Rebrand signals are set to `priority: 'HIGH'` before Claude enrichment.
 
-**Step 2.9: Apply Claude API Enrichment (most expensive, runs last)**
+Each signal is sent to Claude with its type, company name, industry, revenue, employee count, and signal details. Claude returns a JSON object with `priority`, `brief`, `contact_approach`, `bespoke` (boolean), and `bespoke_reason` (string). 
 
-**Purpose:** Add priority (HIGH/MEDIUM/LOW), brief (2 sentences), and contact_approach (1 sentence) to each signal. Uses `@anthropic-ai/sdk` (official Anthropic SDK), not raw axios. Model: `CLAUDE_MODEL` env var (default `claude-haiku-4-5-20251001`).
+**Bespoke Evaluation Rule (Feature A5):** Claude evaluates whether a signal requires custom, handcrafted outreach by a senior Starfish partner rather than an automated sequence. Signals are flagged `bespoke = true` if:
+1. The company is a widely recognized Fortune 100 or global household brand (Apple, Nike, Goldman Sachs, etc.).
+2. The deal or funding round is $1 billion USD or more.
+3. The contact is a C-Suite executive at a company with 50,000+ employees.
+4. The situation is so specific that automated sequences would sound generic or tone-deaf.
 
-Each signal is sent to Claude with its type, company name, industry, revenue, employee count, and signal details. Claude returns a JSON object with `priority`, `brief`, and `contact_approach`. On failure, default values are assigned (priority: MEDIUM, brief: "Signal requires manual review.").
+**Reclassification Rule (Features A3 & A4):** Immediately after Claude enrichment, `reclassifyNewsPressSignals()` scans `News/Press` signals:
+- **A3 (Funding):** If funding keywords (`series a`, `raises $`, `seed round`, etc.) match, reclassifies `type` to `"Funding"`.
+- **A4 (Job Change):** If appointment keywords (`appoints`, `joins as`, `new cmo`, etc.) AND marketing title keywords match, reclassifies `type` to `"Job Change"`.
+- A3 runs before A4 to ensure funding rounds with appointment mentions are correctly classified as Funding.
+
+On failure during Claude enrichment, default values are assigned (priority: MEDIUM, brief: "Signal requires manual review.", bespoke: false).
 
 Signal types supported: "Job Change", "News/Press", "M&A Activity", "Rebrand".
 
@@ -1071,13 +1084,17 @@ Before email enrichment, fill missing revenue, industry, and website data via Ap
 
 **Apollo cache key:** extracted domain (from website) or company name. On cache hit, reuse stored enrichment data. On cache miss, call `POST /organizations/enrich` and store result. 400ms delay between calls.
 
-**Step 4.1: Email Enrichment (7-step cascade)**
+**Workflow 4 Quality Upgrades (Prompts 23–26 / Features A8, A9, A11, A12):**
+- **Domain Validation Enforcement (A8):** `isEmailDomainValid()` handles country-code TLDs (rejects `@sunlife.com.ph` against `sunlife.com`) and is enforced before every contact save.
+- **Extended Title Rejection & MLM Check (A9):** `REJECTED_TITLE_WORDS` expanded with 40+ non-target roles (Branch Manager, Product Manager, Copy Director). Added `isEmploymentStatusRejected()` (rejects "Seeking New Opportunity", "Open to Work") and `isMLMDistributor()` (rejects inflated ranks at direct-sales companies).
+- **Name Completeness Check (A11):** `isNameComplete()` rejects contacts with single-character initials (e.g., "Adeline H") or placeholders ("Unknown", "N/A").
+- **Database Reverification Script (A12):** `scripts/reverify_database.js` updated to run all quality checks against unverified records and new Airtable contacts.
 
-For each signal, find the best available email address using a 7-step cascade. **Apollo always runs before Hunter across all signal types.** All email candidates are validated with `isFakeEmail()` (imported from `utils/email_validator.js`) which rejects generic prefixes (info@, admin@, support@), personal email domains (gmail.com, yahoo.com), third-party search domains, and file extension patterns.
+For each signal, find the best available email address using `findBroadcastContacts()` (universal broadcast) or the 7-step cascade. **Apollo always runs before Hunter across all signal types.** All email candidates are validated with `verifyEmail()` (imported from `utils/email_validator.js`).
 
 **Circuit breakers:** 3 consecutive failures → API blocked for 5 min. 401, 429, and **422** (domain not in database — "not found", not an outage) do **NOT** trip the circuit.
 
-**BSI signals** use a separate 4-tier waterfall (see Workflow 4b in `workflow_4_save_to_airtable.md`). All BSI contacts must pass `isBSIAllowedTitle()` — only CMO/VP Marketing/Head/Director of Marketing-level roles are accepted. Contacts with irrelevant titles are dropped before Airtable.
+**BSI signals** use a separate 4-tier waterfall (see Workflow 4b in `workflow_4_save_to_airtable.md`). All BSI contacts must pass `isBSIAllowedTitle()` — only CMO/VP Marketing/Head/Director of Marketing-level roles are accepted (or C-Suite fallbacks). Contacts with irrelevant titles (or from Non-Profit/Gov/MLM industries) are dropped before Airtable. BSI signals spawn up to 5 Airtable records per company with Send Days assigned (Day 1: CMO, Day 2: CEO, etc.).
 
 **Cascade order for non-BSI (stops at first valid result):**
 
@@ -2640,7 +2657,7 @@ app.listen(PORT, () => {
 
 **Project Metrics (final assessment on Day 10):**
 - On-time delivery: Handoff completed by May 22, 2026 (Day 10)
-- Budget adherence: Total cost ≤ $1,500 USD (no overages)
+- Budget adherence: Total cost = $6,500 USD (Full Build)
 - Client satisfaction: Positive feedback from David/Zack (verbal or written)
 - System reliability: 3+ consecutive days without issues (Days 8-10 minimum)
 - Code quality: Zero critical bugs reported during 48-hour support period
@@ -2741,10 +2758,10 @@ This document defines EXACTLY what will be built for Starfish Signal Monitor Pil
 This section defines the React dashboard built on top of the existing signal monitor. The signal monitor (Part 1) is already built and running on Railway — this dashboard is read-only from its perspective.
 
 **Project:** Starfish Signal Dashboard (MVP)
-**Client:** Starfish Co. (David Kessler, Zack Kessler, Carly Cygielman)
+**Client:** Starfish Co. (David Kessler, Zack Kessler, Andrew Bell, Cole Straughn)
 **Developer:** Gideon Awotuyi
 **Branch:** `react-dashboard`
-**Purpose:** A React web dashboard so Carly, David, and Zack can review AI-detected intent signals, manage their outreach status, and push contacts to HubSpot — all in one place.
+**Purpose:** A React web dashboard so David, Zack, Andrew, and Cole can review AI-detected intent signals, manage their outreach status, and push contacts to HubSpot — all in one place.
 
 ---
 
@@ -2752,13 +2769,14 @@ This section defines the React dashboard built on top of the existing signal mon
 
 The Starfish Signal Monitor detects companies that may need Starfish's branding services — based on job changes, M&A activity, press releases, website visits, and brand strategy intent. It saves those signals to a Supabase database every morning at 5 AM EST.
 
-This dashboard is the front door to that data. It is used by three people:
+This dashboard is the front door to that data. It is used by four people:
 
-- **Carly Cygielman** — handles outreach. She works signals daily: reviewing them, updating their status, and pushing contacts to HubSpot.
+- **Andrew Bell** — handles outreach. Reviews signals daily, updates status, and pushes contacts to HubSpot.
+- **Cole Straughn** — handles outreach. Reviews signals daily, updates status, and pushes contacts to HubSpot.
 - **David Kessler** — reviews signal quality and monitors what's coming in.
 - **Zack Kessler** — reviews signal quality and monitors what's coming in.
 
-All three log in with email + password via Supabase Auth. No role-based access in MVP.
+All four log in with email + password via Supabase Auth. No role-based access in MVP.
 
 **The dashboard does NOT generate signals.** It only reads, displays, and manages signals that the Railway signal monitor has already saved to Supabase.
 
@@ -2878,7 +2896,7 @@ Supabase is used **exclusively for authentication**. No signal data is stored in
 | What | Detail |
 |------|--------|
 | Project | `ajqhtmksrmbaxdklawrm.supabase.co` |
-| Auth users | david@starfishco.com, zack@starfishco.com, carly@starfishco.com |
+| Auth users | david@starfishco.com, zack@starfishco.com, andrew@starfishco.com, cole@starfishco.com |
 | Auth method | `signInWithPassword()` — email + password |
 | Session storage | localStorage (handled automatically by `@supabase/supabase-js`) |
 | Frontend client | Anon key only (`VITE_SUPABASE_ANON_KEY`) |
@@ -3110,6 +3128,7 @@ Three user accounts exist in Supabase Auth for dashboard access:
 |------|-------|-------|
 | David Kessler | david@starfishco.com | Co-founder — reviews signals |
 | Zack Kessler | zack@starfishco.com | Co-founder — reviews signals |
-| Carly Cygielman | carly@starfishco.com | Primary user — daily outreach |
+| Andrew Bell | andrew@starfishco.com | Daily outreach |
+| Cole Straughn | cole@starfishco.com | Daily outreach |
 
 **To send a password reset:** Supabase Dashboard → Authentication → Users → click the user row → "Send password recovery email". Each user should set their own password before first login.

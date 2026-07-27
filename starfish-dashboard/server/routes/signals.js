@@ -1,5 +1,5 @@
 import express from 'express'
-import { getAllSignals, getSignalById, updateSignalStatus, updateContactInfo } from '../lib/airtable.js'
+import { getAllSignals, getSignalById, updateSignalStatus, updateContactInfo, updateAcquiredCompany, updateSignalField } from '../lib/airtable.js'
 
 const router = express.Router()
 
@@ -12,6 +12,7 @@ const VALID_SIGNAL_TYPES = [
   'Website Visitor',
   'News/Press',
   'Rebrand',
+  'Funding',
 ]
 
 const VALID_PRIORITIES = ['HIGH', 'MEDIUM', 'LOW']
@@ -107,6 +108,72 @@ router.patch('/:id/contact', async (req, res) => {
     }
     console.error('[PATCH /api/signals/:id/contact] Airtable error:', err.message)
     res.status(500).json({ error: 'Failed to save contact info.' })
+  }
+})
+
+// PATCH /api/signals/:id/acquired-company — save acquired company name for M&A signals
+router.patch('/:id/acquired-company', async (req, res) => {
+  const { id } = req.params
+  const { acquired_company } = req.body
+
+  if (!acquired_company?.trim()) {
+    return res.status(400).json({ error: 'Acquired company name is required.' })
+  }
+
+  try {
+    await updateAcquiredCompany(id, acquired_company.trim())
+    res.status(200).json({ success: true, acquired_company: acquired_company.trim() })
+  } catch (err) {
+    if (err.statusCode === 404 || err.message?.includes('Record not found')) {
+      return res.status(404).json({ error: 'Signal not found.' })
+    }
+    console.error('[PATCH /api/signals/:id/acquired-company] Airtable error:', err.message)
+    res.status(500).json({ error: 'Failed to save acquired company.' })
+  }
+})
+
+// Airtable record IDs: "rec" + 10–17 alphanumeric characters
+const AIRTABLE_ID_REGEX = /^rec[A-Za-z0-9]{10,17}$/
+
+/**
+ * PATCH /api/signals/:id/field
+ *
+ * Updates a single editable field on a signal record in Airtable.
+ * Only allows specific fields — never arbitrary field names (injection risk).
+ * Used by the inline edit fields on the Signal Detail validation banner.
+ */
+router.patch('/:id/field', async (req, res) => {
+  const { id } = req.params
+  const { field, value } = req.body
+
+  console.log(`[PATCH /api/signals/${id}/field] Updating field: ${field}`)
+
+  if (!AIRTABLE_ID_REGEX.test(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid signal ID format' })
+  }
+
+  // Allowlist — ONLY these fields may be updated via this endpoint
+  const ALLOWED_FIELDS = ['industry', 'acquired_company']
+  if (!ALLOWED_FIELDS.includes(field)) {
+    console.log(`[PATCH /api/signals/${id}/field] Rejected — field "${field}" not in allowlist`)
+    return res.status(400).json({ success: false, error: `Field "${field}" cannot be edited` })
+  }
+
+  if (!value || typeof value !== 'string' || value.trim().length === 0) {
+    return res.status(400).json({ success: false, error: 'Value must be a non-empty string' })
+  }
+
+  if (value.trim().length > 200) {
+    return res.status(400).json({ success: false, error: 'Value must be 200 characters or less' })
+  }
+
+  try {
+    await updateSignalField(id, field, value.trim())
+    console.log(`[PATCH /api/signals/${id}/field] ✓ Updated ${field} for signal ${id}`)
+    return res.json({ success: true })
+  } catch (err) {
+    console.log(`[PATCH /api/signals/${id}/field] Airtable update failed: ${err.message}`)
+    return res.status(500).json({ success: false, error: 'Failed to save. Please try again.' })
   }
 })
 

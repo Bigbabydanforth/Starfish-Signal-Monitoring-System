@@ -271,6 +271,10 @@
             <div class="stat-label">Low Priority</div>
           </td>
           <td class="stat-box">
+            <div class="stat-number" style="color:#6da3ab;">{{FUNDING_COUNT}}</div>
+            <div class="stat-label">Funding</div>
+          </td>
+          <td class="stat-box">
             <div class="stat-number research">{{RESEARCH_NEEDED_COUNT}}</div>
             <div class="stat-label">Research Needed</div>
           </td>
@@ -287,12 +291,61 @@
       </div>
       {{/if}}
 
+      <!-- BESPOKE SIGNALS — Always shown first, before HIGH priority -->
+      {{#if BESPOKE_SIGNALS}}
+      <div class="priority-section bespoke" style="margin-bottom:30px;">
+        <h3 style="font-size:15px; font-weight:700; margin-bottom:15px; padding-bottom:8px;
+                    border-bottom:3px solid #E8673A; color:#E8673A;">
+          ⚠ Bespoke Signals — Manual Outreach Required
+        </h3>
+        <p style="font-size:13px; color:#78350F; background:#FEF3F0; border:1px solid #E8673A;
+                   border-radius:6px; padding:10px 14px; margin-bottom:16px; line-height:1.5;">
+          These signals require custom, handcrafted outreach by Andrew or Cole.
+          Do NOT enroll in automated sequences.
+        </p>
+        {{#each BESPOKE_SIGNALS}}
+        <div class="signal-card" style="border-left:4px solid #E8673A; padding:18px; margin-bottom:15px;
+                                         box-shadow:0 1px 3px rgba(0,0,0,0.1); background:#ffffff;">
+          <div class="signal-header" style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+            <div class="company-name" style="font-size:17px; font-weight:700; color:#2d2d2d;">{{company_name}}</div>
+            <span style="display:inline-block; padding:4px 10px; border-radius:12px; font-size:11px;
+                         font-weight:700; text-transform:uppercase; letter-spacing:0.5px;
+                         background:#E8673A; color:#ffffff; margin-left:10px;">BESPOKE</span>
+          </div>
+          <div class="signal-type" style="font-size:12px; color:#7F8C8D; text-transform:uppercase;
+                                           font-weight:600; letter-spacing:0.5px; margin-bottom:10px;">
+            {{signal_type}} — {{priority}}
+          </div>
+          <div class="signal-details" style="font-size:14px; color:#555555; margin-bottom:12px; line-height:1.5;">
+            {{signal_details}}
+          </div>
+          {{#if bespoke_reason}}
+          <div style="font-size:13px; color:#E8673A; font-style:italic; margin-bottom:12px;
+                      padding-left:12px; border-left:3px solid #E8673A;">
+            Reason: {{bespoke_reason}}
+          </div>
+          {{/if}}
+          <div class="signal-brief" style="font-size:14px; color:#34495E; font-style:italic;
+                                            margin-bottom:12px; padding-left:12px; border-left:3px solid #BDC3C7;">
+            💡 {{brief}}
+          </div>
+          <div class="signal-meta" style="font-size:13px; color:#7F8C8D; line-height:1.6;">
+            <strong>Contact:</strong> {{contact_info}}<br>
+            <strong>Industry:</strong> {{industry}}<br>
+            <strong>Source:</strong> <a href="{{source_url}}" style="color:#3498DB; text-decoration:none;">View Details</a>
+          </div>
+        </div>
+        {{/each}}
+      </div>
+      {{/if}}
+
       <!-- HIGH Priority Signals -->
       {{#if HIGH_SIGNALS}}
       <div class="priority-section high">
         <h3>🔴 High Priority Signals</h3>
         {{#each HIGH_SIGNALS}}
         <div class="signal-card high">
+          {{#if bespoke}}<div style="background:#E8673A;color:#ffffff;font-size:11px;font-weight:700;padding:6px 12px;margin-bottom:10px;border-radius:4px;letter-spacing:0.05em;">&#x26A0; BESPOKE — Manual outreach required. Do not enroll in sequence. Assign to Andrew or Cole.{{#if bespoke_reason}}<br><span style="font-weight:400;font-size:11px;">{{bespoke_reason}}</span>{{/if}}</div>{{/if}}
           <div class="signal-header">
             <div class="company-name">{{company_name}}</div>
             <span class="priority-badge high">HIGH</span>
@@ -304,7 +357,43 @@
             {{#if contacts}}
             <div class="contacts-list">
               <strong>Contacts ({{contacts_count}} found):</strong><br>
-              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span style="display:inline-block;background:#004b5c;color:#ffffff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;margin-right:6px;">DAY {{day}}</span>{{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+            </div>
+            {{else if contact_needed}}
+            <div class="contact-needed-block">
+              <strong>⚠️ Contact Needed</strong><br>
+              No marketing contact identified in Apollo or Hunter.<br>
+              {{#if company_website}}<strong>Company website:</strong> <a href="{{company_website}}">{{company_website}}</a><br>{{/if}}
+              <em>Recommended: Search LinkedIn for CMO, VP Marketing, or Head of Brand at {{company_name}}</em>
+            </div>
+            {{/if}}
+            <strong>Industry:</strong> {{industry}}<br>
+            <strong>Source:</strong> <a href="{{source_url}}">View Details</a>
+          </div>
+        </div>
+        {{/each}}
+      </div>
+      {{/if}}
+
+      <!-- Funding Signals -->
+      {{#if FUNDING_SIGNALS}}
+      <div class="priority-section" style="border-top: 3px solid #6da3ab; margin-top: 24px;">
+        <h3 style="color:#6da3ab; border-bottom: 2px solid #6da3ab; padding-bottom: 8px;">💰 Funding Signals</h3>
+        {{#each FUNDING_SIGNALS}}
+        <div class="signal-card" style="border-left: 4px solid #6da3ab;">
+          {{#if bespoke}}<div style="background:#E8673A;color:#ffffff;font-size:11px;font-weight:700;padding:6px 12px;margin-bottom:10px;border-radius:4px;letter-spacing:0.05em;">&#x26A0; BESPOKE — Manual outreach required. Do not enroll in sequence. Assign to Andrew or Cole.{{#if bespoke_reason}}<br><span style="font-weight:400;font-size:11px;">{{bespoke_reason}}</span>{{/if}}</div>{{/if}}
+          <div class="signal-header">
+            <div class="company-name">{{company_name}}</div>
+            <span class="priority-badge" style="background:#6da3ab;">FUNDING</span>
+          </div>
+          <div class="signal-type">{{signal_type}}</div>
+          <div class="signal-details">{{signal_details}}</div>
+          <div class="signal-brief">{{brief}}</div>
+          <div class="signal-meta">
+            {{#if contacts}}
+            <div class="contacts-list">
+              <strong>Contacts ({{contacts_count}} found):</strong><br>
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span style="display:inline-block;background:#004b5c;color:#ffffff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;margin-right:6px;">DAY {{day}}</span>{{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
             </div>
             {{else if contact_needed}}
             <div class="contact-needed-block">
@@ -328,6 +417,7 @@
         <h3>🟡 Medium Priority Signals</h3>
         {{#each MEDIUM_SIGNALS}}
         <div class="signal-card medium">
+          {{#if bespoke}}<div style="background:#E8673A;color:#ffffff;font-size:11px;font-weight:700;padding:6px 12px;margin-bottom:10px;border-radius:4px;letter-spacing:0.05em;">&#x26A0; BESPOKE — Manual outreach required. Do not enroll in sequence. Assign to Andrew or Cole.{{#if bespoke_reason}}<br><span style="font-weight:400;font-size:11px;">{{bespoke_reason}}</span>{{/if}}</div>{{/if}}
           <div class="signal-header">
             <div class="company-name">{{company_name}}</div>
             <span class="priority-badge medium">MEDIUM</span>
@@ -339,7 +429,7 @@
             {{#if contacts}}
             <div class="contacts-list">
               <strong>Contacts ({{contacts_count}} found):</strong><br>
-              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span style="display:inline-block;background:#004b5c;color:#ffffff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;margin-right:6px;">DAY {{day}}</span>{{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
             </div>
             {{else if contact_needed}}
             <div class="contact-needed-block">
@@ -363,6 +453,7 @@
         <h3>⚪ Low Priority Signals</h3>
         {{#each LOW_SIGNALS}}
         <div class="signal-card low">
+          {{#if bespoke}}<div style="background:#E8673A;color:#ffffff;font-size:11px;font-weight:700;padding:6px 12px;margin-bottom:10px;border-radius:4px;letter-spacing:0.05em;">&#x26A0; BESPOKE — Manual outreach required. Do not enroll in sequence. Assign to Andrew or Cole.{{#if bespoke_reason}}<br><span style="font-weight:400;font-size:11px;">{{bespoke_reason}}</span>{{/if}}</div>{{/if}}
           <div class="signal-header">
             <div class="company-name">{{company_name}}</div>
             <span class="priority-badge low">LOW</span>
@@ -374,7 +465,7 @@
             {{#if contacts}}
             <div class="contacts-list">
               <strong>Contacts ({{contacts_count}} found):</strong><br>
-              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span style="display:inline-block;background:#004b5c;color:#ffffff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;margin-right:6px;">DAY {{day}}</span>{{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
             </div>
             {{else if contact_needed}}
             <div class="contact-needed-block">
@@ -413,7 +504,7 @@
             {{#if contacts}}
             <div class="contacts-list">
               <strong>Contacts ({{contacts_count}} found):</strong><br>
-              {{#each contacts}}<div class="contact-row">{{#if day}}<span class="day-badge">Day {{day}}</span> {{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
+              {{#each contacts}}<div class="contact-row">{{#if day}}<span style="display:inline-block;background:#004b5c;color:#ffffff;font-size:11px;font-weight:600;padding:2px 8px;border-radius:3px;margin-right:6px;">DAY {{day}}</span>{{/if}}<strong>{{name}}</strong>, {{title}} — {{contact_str}}{{#if badge_verified}} <span class="verif-verified">✓ verified</span>{{/if}}{{#if badge_unverified}} <span class="verif-unverified">⚠ unverified</span>{{/if}}{{#if badge_no_email}} <span class="verif-no-email">✗ no email</span>{{/if}}</div>{{/each}}
             </div>
             {{else if contact_needed}}
             <div class="contact-needed-block">

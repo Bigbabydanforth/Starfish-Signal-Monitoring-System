@@ -220,6 +220,10 @@ const GARBAGE_PATTERNS = [
   /^launches\b/i,
   /^completes\b/i,
   /^acquires\b/i,
+  // Junk names from production review (July 2026)
+  /\bclass period\b/i,      // "Class Period" — securities litigation term, not a company
+  /\s\/\s/,                  // "AT&T Stadium / Stars" — slash-separated article fragment, not a company name
+  /^[A-Z]{1,2}$/,           // Single/double uppercase letter abbreviations like "WH", "AB" — not real company names
 ];
 
 function isGarbageName(name) {

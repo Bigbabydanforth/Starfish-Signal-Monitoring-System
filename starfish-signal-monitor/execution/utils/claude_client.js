@@ -33,13 +33,33 @@ Your tasks:
 2. Write exactly 2 sentences explaining why this signal matters to Starfish
 3. Suggest the best contact approach in exactly 1 sentence. If a contact name or email is provided above, personalise the approach to that specific person and include their email address in the sentence.
 
+Additionally, evaluate whether this signal qualifies as BESPOKE — meaning it requires
+custom, handcrafted outreach by a senior team member rather than an automated email sequence.
+
+Flag as bespoke = true if ANY of the following are true:
+1. The company is a widely recognized household brand (Fortune 100 or equivalent global brand)
+   Examples: Apple, Google, Microsoft, Amazon, Nike, Goldman Sachs, JPMorgan, Coca-Cola,
+   Pepsi, Disney, Netflix, Walmart, Samsung, IBM, McDonald's, Meta, Ford, GE, Boeing
+2. The deal or funding round involved is $1 billion USD or more
+3. The contact is C-Suite (CEO, COO, President) at a company with 50,000 or more employees
+4. The situation is so specific and context-dependent that a template sequence cannot
+   appropriately address it without sounding generic or tone-deaf
+
+For all other signals: bespoke = false. Default to false when uncertain.
+
+Return these additional fields in your JSON response:
+- "bespoke": boolean (true or false)
+- "bespoke_reason": string (one concise sentence explaining WHY, only when bespoke = true; empty string when false)
+
 Respond ONLY with valid JSON. No other text before or after.
 
 JSON format:
 {
   "priority": "HIGH" or "MEDIUM" or "LOW",
   "brief": "Two sentence explanation here.",
-  "contact_approach": "One sentence suggestion here."
+  "contact_approach": "One sentence suggestion here.",
+  "bespoke": true or false,
+  "bespoke_reason": "One sentence reason here, or empty string."
 }`;
 
 // BSI-specific template — no contact fields, company-level focus only
@@ -57,13 +77,33 @@ Your tasks:
 2. Write exactly 2 sentences explaining why this company is a strong Starfish prospect based on their size, industry, and the fact they are actively evaluating branding services
 3. Suggest the best contact approach in exactly 1 sentence — recommend which executive role to target (CMO, VP Marketing, Head of Brand, etc.) and the outreach angle. Do not name a specific person.
 
+Additionally, evaluate whether this signal qualifies as BESPOKE — meaning it requires
+custom, handcrafted outreach by a senior team member rather than an automated email sequence.
+
+Flag as bespoke = true if ANY of the following are true:
+1. The company is a widely recognized household brand (Fortune 100 or equivalent global brand)
+   Examples: Apple, Google, Microsoft, Amazon, Nike, Goldman Sachs, JPMorgan, Coca-Cola,
+   Pepsi, Disney, Netflix, Walmart, Samsung, IBM, McDonald's, Meta, Ford, GE, Boeing
+2. The deal or funding round involved is $1 billion USD or more
+3. The contact is C-Suite (CEO, COO, President) at a company with 50,000 or more employees
+4. The situation is so specific and context-dependent that a template sequence cannot
+   appropriately address it without sounding generic or tone-deaf
+
+For all other signals: bespoke = false. Default to false when uncertain.
+
+Return these additional fields in your JSON response:
+- "bespoke": boolean (true or false)
+- "bespoke_reason": string (one concise sentence explaining WHY, only when bespoke = true; empty string when false)
+
 Respond ONLY with valid JSON. No other text before or after.
 
 JSON format:
 {
   "priority": "HIGH" or "MEDIUM" or "LOW",
   "brief": "Two sentence explanation here.",
-  "contact_approach": "One sentence suggestion here."
+  "contact_approach": "One sentence suggestion here.",
+  "bespoke": true or false,
+  "bespoke_reason": "One sentence reason here, or empty string."
 }`;
 
 function buildUserMessage(promptVars) {
@@ -108,10 +148,19 @@ function parseAndValidate(text) {
     throw new Error('Missing or empty contact_approach in Claude response');
   }
 
+  // LOW priority + bespoke is a contradiction: if Claude rates the signal low value,
+  // routing it to senior team for handcrafted outreach wastes their time.
+  const bespoke = parsed.bespoke === true && parsed.priority !== 'LOW';
+  const bespokeReason = bespoke && (typeof parsed.bespoke_reason === 'string')
+    ? parsed.bespoke_reason.slice(0, 300).trim()
+    : '';
+
   return {
     priority:         parsed.priority,
     brief:            parsed.brief.trim(),
-    contact_approach: parsed.contact_approach.trim()
+    contact_approach: parsed.contact_approach.trim(),
+    bespoke,
+    bespoke_reason:   bespokeReason
   };
 }
 
@@ -132,13 +181,13 @@ async function callClaude(userMessage) {
 }
 
 // Infer the industry for a company when Apollo/PDL returned nothing.
-// Uses a single low-token Haiku call — non-critical, failures are silently swallowed.
+// Uses Sonnet for a more accurate guess — this is the last resort fallback.
 // Returns a string like "Financial Services" or null on failure.
 async function inferIndustry(companyName, website) {
   try {
     const message = await client.messages.create(
       {
-        model:      CLAUDE_MODEL,
+        model:      'claude-sonnet-4-6',
         max_tokens: 30,
         messages: [{
           role:    'user',
@@ -148,7 +197,12 @@ async function inferIndustry(companyName, website) {
       { timeout: 10_000 }
     );
     const text = message.content[0]?.text?.trim();
-    return text || null;
+    if (!text) return null;
+    // Reject hedge/refusal responses — a valid industry label is short (1-5 words).
+    // If Claude can't determine the industry, it hedges with a long sentence — drop it.
+    if (text.length > 60) return null;
+    if (/\b(I don'?t|I cannot|I can'?t|I am not|without (a |additional |more )?context|insufficient|not enough information)\b/i.test(text)) return null;
+    return text;
   } catch (_) {
     return null;  // non-critical — caller falls back to 'Unknown'
   }
@@ -175,4 +229,49 @@ async function enrichSignal(promptVars) {
   }
 }
 
-export { enrichSignal, inferIndustry };
+// Classify a News/Press signal as M&A or not.
+// Returns { is_ma: bool, acquired_company: string|null, confidence: 'high'|'medium'|'low' }.
+// Never throws — returns { is_ma: false, acquired_company: null, confidence: 'low' } on any error.
+async function classifyMaSignal(company, details, brief) {
+  const prompt = `Company: ${company || 'Unknown'}
+
+Signal Details: ${details || 'No details available'}
+
+Brief: ${brief || 'No brief available'}
+
+Is this an M&A (merger/acquisition/buyout/takeover) signal?
+If yes, what is the name of the company being acquired/merged?
+
+Respond ONLY with JSON:
+{"is_ma": true or false, "acquired_company": "Company Name" or null, "confidence": "high" or "medium" or "low"}`;
+
+  try {
+    const message = await client.messages.create(
+      {
+        model:      CLAUDE_MODEL,
+        max_tokens: 150,
+        system:     'You are classifying news signals for a sales intelligence system. Determine whether a signal describes M&A activity: an acquisition, merger, buyout, takeover, or similar deal where one company is purchasing or merging with another. Return ONLY valid JSON — no other text.',
+        messages:   [{ role: 'user', content: prompt }],
+      },
+      { timeout: 20_000 }
+    );
+
+    const text = message.content[0]?.text?.trim();
+    if (!text) throw new Error('Empty response');
+
+    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const parsed  = JSON.parse(cleaned);
+
+    return {
+      is_ma:            parsed.is_ma === true,
+      acquired_company: typeof parsed.acquired_company === 'string' && parsed.acquired_company.trim()
+        ? parsed.acquired_company.trim()
+        : null,
+      confidence: ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'low',
+    };
+  } catch (_) {
+    return { is_ma: false, acquired_company: null, confidence: 'low' };
+  }
+}
+
+export { enrichSignal, inferIndustry, classifyMaSignal };

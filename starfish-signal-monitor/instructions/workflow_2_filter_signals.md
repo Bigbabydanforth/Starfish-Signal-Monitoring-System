@@ -53,11 +53,16 @@ Function: `passesCompanySizeFilter(signal)`
 
 ### Step 2.2 — Job Title Filter
 
-**Rule:** Applies only to `type === "Job Change"` signals. All other types (`News/Press`, `M&A Activity`, `Rebrand`) pass automatically.
+**Rule:** Evaluates titles for `Job Change`, `Brand Strategy Intent`, and `Website Visitor` signals. All other types (`News/Press`, `M&A Activity`, `Rebrand`) pass automatically.
 
-**PDL keyword check:** PDL signals pass if the title contains `marketing`, `brand`, or a matching C-suite acronym (`cmo`, `cco`, `cbo`, `ceo`, `coo`) using word-boundary regex, or `chief executive`, `chief operating`, or `president` (excluding `vice president`). This narrows PDL's broad `marketing` job_title_role bucket.
+**BSI and Website Visitor signals:**
+Strict evaluation to ensure the triggering person is a valid Starfish target. Drops signals where the person holds non-commercial titles (e.g. coach, teacher, pastor, student) or works in non-target industries (VC/PE, government, staffing).
+- For BSI: The person must have a core marketing title (`CMO`, `CBO`, `CCO`, `VP Marketing`) or a senior general title (`CEO`, `COO`, `President`). Non-marketing junior titles drop the signal.
+- For Website Visitor: Similar strict rules apply, but if no person is identified, the signal is flagged and allowed to pass (so Apollo can find the correct contact in Workflow 4).
 
-**For Apollo signals**, `person.title` must match at least one of the following (case-insensitive substring match):
+**PDL signals (Job Change):** Get a keyword check (must contain `marketing`, `brand`, or matching C-suite acronym with word-boundary regex).
+
+**Apollo signals (Job Change):** `person.title` must match at least one of the following (case-insensitive substring match):
 
 *Core titles (21 entries):*
 `cmo`, `chief marketing officer`, `chief brand officer`, `cbo`, `chief executive officer`, `ceo`, `chief operating officer`, `coo`, `president`, `vp marketing`, `vp of marketing`, `vice president marketing`, `vice president of marketing`, `vp brand`, `vice president brand`, `vice president of brand`, `svp brand`, `svp marketing`, `svp of marketing`, `senior vice president brand`, `senior vice president of brand`, `senior vice president marketing`, `senior vice president of marketing`, `head of marketing`, `head of brand`, `director of marketing`, `marketing director`, `chief growth officer`, `brand marketing`
@@ -87,6 +92,8 @@ Non-Job Change signals pass automatically.
 ### Step 2.4 — Geography Filter
 
 **Rule:** `company.headquarters.country` must match one of (case-insensitive): `united states`, `usa`, `us`, `u.s.`, `u.s.a.`
+
+**Secondary Gates:** If no country data is present, the company website is checked for foreign TLDs (`.jp`, `.cn`, `.co.uk`, `.com.au`, etc.) and the signal text is checked for foreign currency indicators (`€`, `£`, `¥`, `₹`, `rupees`, etc.). Signals triggering these are dropped.
 
 **Source-level exceptions:**
 - **Apollo, MediaStack, NewsAPI, PredictLeads signals** with no country data: auto-pass. These sources either pre-filter at the API level or do not return country data.
@@ -127,7 +134,10 @@ Non-job-change articles (funding, M&A, earnings) pass through untouched.
 - **receives_financing:** Free pass — the funding raise itself is the signal, not revenue.
 - **acquires / merges_with / sells_assets_to:** At least one company (acquirer or target) must have revenue >= $50M to qualify.
 
-For qualifying deal types, Apollo is called for both the acquirer and the seller/target company. Enriched revenue, industry, website, and HQ data are attached to the signal. The seller's revenue is stored as `signal.deal.seller_revenue`.
+For qualifying deal types, Apollo is called for both the acquirer and the seller/target company (`enrichMaCompany`). Enriched revenue, industry, website, and HQ data are attached to the signal. The seller's revenue is stored as `signal.deal.seller_revenue`.
+
+**M&A Apollo Executive Lookup:**
+If an M&A signal passes the revenue verification, the system calls Apollo (`fetchMaCSuite`) for the acquiring company to fetch up to 5 top C-Suite or marketing executives. This guarantees that actionable contacts are sent to Claude and Airtable, preventing generic M&A signals without clear targets. The contacts are stored in `signal.ma_contacts`.
 
 ---
 
@@ -158,17 +168,30 @@ For each signal that passes all previous filters, call the Claude API via the An
 Signal details by type:
 - Job Change: `"{first_name} {last_name} joined {company.name} as {title}."`
 - News/Press (MediaStack / NewsAPI): article title + description
-- M&A Activity (PredictLeads): deal type + company name + seller + deal amount + seller revenue
+- M&A Activity (PredictLeads): deal type + company name + seller + deal amount + seller revenue + key executive contacts (fetched from Apollo)
 - Rebrand (PredictLeads): company name + new brand name + summary
+- Brand Strategy Intent: intent statement + size + industry (contacts omitted from prompt to prevent hallucinations)
+- Website Visitor: visitor name/title + company name + visited URL
 
 **Expected JSON response:**
 ```json
 {
   "priority": "HIGH" | "MEDIUM" | "LOW",
   "brief": "Two sentence explanation here.",
-  "contact_approach": "One sentence suggestion here."
+  "contact_approach": "One sentence suggestion here.",
+  "bespoke": true | false,
+  "bespoke_reason": "One sentence reason here when bespoke = true."
 }
 ```
+
+**Bespoke Signal Flag (Feature A5):** Evaluates if a signal requires handcrafted executive outreach instead of an automated sequence (Fortune 100 brands, $1B+ deals, C-Suite at 50k+ employee orgs).
+
+### Step 2.10 — News/Press Reclassification (Features A3 & A4)
+
+Immediately after Claude enrichment:
+- **A3 (Funding):** Scans remaining `News/Press` signals for funding keywords (`series a`, `raises $`, `funding round`, etc.). If matched, reclassifies `type` to `"Funding"`.
+- **A4 (Job Change Press Releases):** Scans remaining `News/Press` signals for appointment keywords (`appoints`, `joins as`, `new cmo`, etc.) involving marketing leadership. If matched, reclassifies `type` to `"Job Change"`.
+- A3 runs before A4 so funding rounds that mention appointments remain classified as `Funding`.
 
 Rate limit protection: wait 500ms between each Claude API call.
 

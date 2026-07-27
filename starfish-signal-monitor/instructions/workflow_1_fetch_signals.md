@@ -327,11 +327,11 @@ AudienceLab provides two signal types from two separate segment IDs:
 - **Pixel segment** (`AUDIENCELAB_SEGMENT_PIXEL`) — companies that visited the Starfish website (type: `"Website Visitor"`)
 - **Leads segment** (`AUDIENCELAB_SEGMENT_LEADS`) — companies actively researching brand strategy online (type: `"Brand Strategy Intent"`)
 
-**Pagination cursor:** A bookmark file (`.tmp/audiencelab_cursor.json`) records which page each segment left off at. Each run picks up from that page rather than restarting from page 1. When a segment is fully exhausted, the cursor resets to page 1 for the next cycle. This allows processing large backlogs (14,000+ records) at 1,000 per run without losing progress.
+**Pagination cursor:** Cursors are saved to `RAILWAY_VOLUME_MOUNT_PATH/audiencelab_cursor.json` to persist across Docker ephemeral instances on Railway. Each run picks up from the saved cursor page rather than restarting from page 1. When a segment is fully exhausted, the cursor resets to page 1 for the next cycle. This allows processing large backlogs (14,000+ records) efficiently without losing progress.
 
 **Per-run caps:**
-- Pixel: `AUDIENCELAB_MAX_PIXEL_PER_RUN` (default 300)
-- Leads: `AUDIENCELAB_MAX_LEADS_PER_RUN` (default 1000)
+- Pixel: `AUDIENCELAB_MAX_PIXEL_PER_RUN` (capped at 300 to avoid blowing Airtable rate limits)
+- Leads: `AUDIENCELAB_MAX_LEADS_PER_RUN` (capped at 200 to enforce quality over quantity for BSI)
 
 **Pre-dedup against Airtable:** Loads all AudienceLab company names seen in the last 90 days before processing. Companies already in Airtable are skipped — no enrichment credits spent.
 

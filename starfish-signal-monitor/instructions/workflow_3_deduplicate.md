@@ -28,7 +28,7 @@ Apply the `GARBAGE_PATTERNS` regex list via `isGarbageName(name)`. Any signal th
 
 ### Step 3.1 — Merge Duplicates Within the Incoming Batch
 
-Before checking Airtable, merge signals that refer to the same company within the current batch. Group signals by normalized company name.
+Before checking Airtable, merge signals that refer to the same company within the current batch. Group signals by **normalized company name AND signal type** (so a Job Change and an M&A signal for the same company are preserved separately).
 
 For groups of 2+:
 - Keep one base record (`group[0]`)
@@ -76,10 +76,11 @@ Apply `normalizeCompanyName()` to ALL company names before comparison. This prev
 ### Step 3.4 — Check Each New Signal
 
 For each signal in `enrichedSignals`:
-1. Normalize its `company.name`
-2. Check if normalized name exists in the normalized recent names list
-3. If found → move to `duplicatesFound`, log company name
-4. If not found → move to `deduplicatedSignals`
+1. Normalize its `company.name` and extract bare domain from `company.website`
+2. Check if normalized name exists in the normalized recent names list from Airtable
+3. Check if bare domain exists in `acceptedDomains` (catches variant company names in the same batch like "Quaise Energy" vs "Quaise Energy Inc")
+4. If matched in Airtable or `acceptedDomains` → move to `duplicatesFound`, log company name/domain
+5. If not found → move to `deduplicatedSignals` and add domain to `acceptedDomains`
 
 ### Step 3.5 — Save Results
 

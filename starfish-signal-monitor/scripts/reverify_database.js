@@ -48,6 +48,9 @@ import {
   isTitleApproved,
   isTitleCSuite,
   isEmailDomainValid,
+  isEmploymentStatusRejected,
+  isMLMDistributor,
+  isNameComplete,
   apolloFindExec,
   apolloBroadcastSearch
 } from '../execution/workflow_4_save_to_airtable.js';
@@ -109,7 +112,7 @@ function hasNoContact(contactInfo) {
 
 // ── Map signal Priority → Status value ───────────────────────────────────────
 // When a Research Needed record gets a contact found, reflect the Claude-assigned
-// priority from the Priority Airtable field in the Status so Carly can triage easily.
+// priority from the Priority Airtable field in the Status so the team can triage easily.
 function priorityToStatus(priority) {
   if (!priority) return 'New';
   switch (priority.trim().toUpperCase()) {
@@ -410,7 +413,8 @@ async function run() {
   let records;
   try {
     records = await query({
-      fields: ['Company Name', 'Signal Type', 'Contact Info', 'Email Verified', 'Status', 'Priority']
+      fields: ['Company Name', 'Signal Type', 'Contact Info', 'Email Verified', 'Status', 'Priority'],
+      // maxRecords: 10  // ← TESTING ONLY: uncomment to limit to 10 records, remove before full run
     });
   } catch (err) {
     console.error(`[reverify] Failed to fetch Airtable records: ${err.message}`);
@@ -437,8 +441,36 @@ async function run() {
       continue;
     }
 
+    // ── Name completeness check (A11) ─────────────────────────────────────────
+    // Incomplete names (single-letter last name, placeholder, missing) need a
+    // replacement contact — send to wrongRole so findContact() runs for them.
+    if (name) {
+      const nameParts = name.trim().split(/\s+/);
+      const firstName = nameParts[0] || '';
+      const lastName  = nameParts.slice(1).join(' ') || '';
+      if (!isNameComplete({ first_name: firstName, last_name: lastName })) {
+        console.log(`  [Categorize] ⛔ ${companyName} — incomplete name "${name}" → needs replacement`);
+        wrongRole.push({ record, companyName, name, email, title, website, signalType, priority, _reason: 'incomplete_name' });
+        continue;
+      }
+    }
+
     if (title) {
-      const approved = isTitleApproved(title) || isTitleCSuite(title);
+      // ── Employment status check (A9) ────────────────────────────────────────
+      // Job-seekers / freelancers with "Former CMO" in title were slipping through.
+      if (isEmploymentStatusRejected(title)) {
+        console.log(`  [Categorize] ⛔ ${companyName} — employment status rejected: "${title}" → needs replacement`);
+        wrongRole.push({ record, companyName, name, email, title, website, signalType, priority, _reason: 'employment_status' });
+        continue;
+      }
+      // ── MLM check (A9) ──────────────────────────────────────────────────────
+      // Distributor ranks at known MLM companies must be replaced.
+      if (isMLMDistributor(title, companyName)) {
+        console.log(`  [Categorize] ⛔ ${companyName} — MLM/distributor title: "${title}" → needs replacement`);
+        wrongRole.push({ record, companyName, name, email, title, website, signalType, priority, _reason: 'mlm' });
+        continue;
+      }
+      const approved = isTitleApproved(title, companyName) || isTitleCSuite(title, companyName);
       if (approved) {
         good.push({ record, companyName, email, title, website, signalType });
       } else {
@@ -466,15 +498,18 @@ async function run() {
   console.log(SEP);
   console.log(`❌ WRONG ROLE — title not in approved list (${wrongRole.length} records)`);
   console.log(SEP);
-  // Group by title so you can see patterns at a glance
+  // Group by rejection reason / title so you can see patterns at a glance
   const byTitle = {};
   for (const r of wrongRole) {
-    const t = r.title || '(no title)';
-    if (!byTitle[t]) byTitle[t] = [];
-    byTitle[t].push(r.companyName);
+    const key = r._reason === 'incomplete_name'    ? `[Incomplete name] "${r.name || ''}"` :
+                r._reason === 'employment_status'  ? `[Employment status] "${r.title}"` :
+                r._reason === 'mlm'                ? `[MLM/distributor] "${r.title}"` :
+                (r.title || '(no title)');
+    if (!byTitle[key]) byTitle[key] = [];
+    byTitle[key].push(r.companyName);
   }
   for (const [title, companies] of Object.entries(byTitle).sort()) {
-    console.log(`  "${title}":`);
+    console.log(`  ${title}:`);
     for (const c of companies) console.log(`    - ${c}`);
   }
 
@@ -516,11 +551,16 @@ async function run() {
     console.log(SEP);
   }
 
-  const wrStats = { replaced: 0, needsReview: 0, skipped: 0 };
+  const wrStats = { replaced: 0, needsReview: 0, skipped: 0, employmentStatusRejected: 0, mlmRejected: 0, nameIncomplete: 0 };
 
+  let wrIdx = 0;
   for (const r of wrongRole) {
+    wrIdx++;
     console.log(`\n[WrongRole] ${r.companyName}`);
-    console.log(`  Current title: "${r.title}"`);
+    if (r._reason === 'incomplete_name') { wrStats.nameIncomplete++; console.log(`  Reason: incomplete name ("${r.name || ''}")`); }
+    else if (r._reason === 'employment_status') { wrStats.employmentStatusRejected++; console.log(`  Reason: employment status rejected ("${r.title}")`); }
+    else if (r._reason === 'mlm') { wrStats.mlmRejected++; console.log(`  Reason: MLM/distributor ("${r.title}")`); }
+    else console.log(`  Current title: "${r.title}"`);
 
     // Determine domain: email domain first, then website, then discovery
     let domain = null;
@@ -529,32 +569,36 @@ async function run() {
     if (!domain) {
       console.log(`  ⚠️  Cannot determine domain — skipping`);
       wrStats.skipped++;
-      continue;
-    }
-
-    const contact = await findContact(domain, r.companyName, r.signalType);
-
-    if (contact && (contact.email || contact.linkedin_url)) {
-      console.log(`  ✅ Replacement: ${contact.name} (${contact.title || 'no title'}) → ${contact.email || 'LinkedIn only'}`);
-      wrStats.replaced++;
-      if (!isDryRun) {
-        updates.push({
-          id:     r.record.id,
-          fields: {
-            'Contact Info':   buildContactInfo(contact.name, contact.title, contact.email, contact.linkedin_url),
-            'Email Verified': contact.email ? 'Unverified' : '',
-            'Status':         'New'
-          }
-        });
-      }
     } else {
-      console.log(`  ✗ No replacement found — marking Needs Review`);
-      wrStats.needsReview++;
-      if (!isDryRun) {
-        updates.push({ id: r.record.id, fields: { 'Status': 'Needs Review' } });
+      const contact = await findContact(domain, r.companyName, r.signalType);
+
+      if (contact && (contact.email || contact.linkedin_url)) {
+        console.log(`  ✅ Replacement: ${contact.name} (${contact.title || 'no title'}) → ${contact.email || 'LinkedIn only'}`);
+        wrStats.replaced++;
+        if (!isDryRun) {
+          updates.push({
+            id:     r.record.id,
+            fields: {
+              'Contact Info':   buildContactInfo(contact.name, contact.title, contact.email, contact.linkedin_url),
+              'Email Verified': contact.email ? 'Unverified' : '',
+              'Status':         'New'
+            }
+          });
+        }
+      } else {
+        console.log(`  ✗ No replacement found — marking Needs Review`);
+        wrStats.needsReview++;
+        if (!isDryRun) {
+          updates.push({ id: r.record.id, fields: { 'Status': 'Needs Review' } });
+        }
       }
+      await new Promise(r => setTimeout(r, 500));
     }
-    await new Promise(r => setTimeout(r, 500));
+
+    if (wrIdx % 50 === 0) {
+      const pct = Math.round((wrIdx / wrongRole.length) * 100);
+      console.log(`\n[Progress — WrongRole] ${wrIdx} / ${wrongRole.length} (${pct}%) processed\n`);
+    }
   }
 
   // ── 2. NO CONTACT — find contacts from scratch ────────────────────────────
@@ -566,38 +610,44 @@ async function run() {
 
   const ncStats = { found: 0, notFound: 0, skipped: 0 };
 
+  let ncIdx = 0;
   for (const r of noContact) {
+    ncIdx++;
     console.log(`\n[NoContact] ${r.companyName} (${r.signalType || 'Unknown type'}) | Priority: ${r.priority || 'n/a'}`);
 
     const domain = await resolveDomain(r.companyName, r.website);
     if (!domain) {
       console.log(`  ⚠️  Cannot determine domain — skipping`);
       ncStats.skipped++;
-      continue;
-    }
-
-    const contact = await findContact(domain, r.companyName, r.signalType);
-
-    if (contact && (contact.email || contact.linkedin_url)) {
-      const newStatus = priorityToStatus(r.priority);
-      console.log(`  ✅ Found: ${contact.name} (${contact.title || 'no title'}) → ${contact.email || 'LinkedIn only'}`);
-      console.log(`  Status → ${newStatus} (from Priority: ${r.priority || 'none'})`);
-      ncStats.found++;
-      if (!isDryRun) {
-        updates.push({
-          id:     r.record.id,
-          fields: {
-            'Contact Info':   buildContactInfo(contact.name, contact.title, contact.email, contact.linkedin_url),
-            'Email Verified': contact.email ? 'Unverified' : '',
-            'Status':         newStatus
-          }
-        });
-      }
     } else {
-      console.log(`  ✗ No contact found — leaving as Research Needed`);
-      ncStats.notFound++;
+      const contact = await findContact(domain, r.companyName, r.signalType);
+
+      if (contact && (contact.email || contact.linkedin_url)) {
+        const newStatus = priorityToStatus(r.priority);
+        console.log(`  ✅ Found: ${contact.name} (${contact.title || 'no title'}) → ${contact.email || 'LinkedIn only'}`);
+        console.log(`  Status → ${newStatus} (from Priority: ${r.priority || 'none'})`);
+        ncStats.found++;
+        if (!isDryRun) {
+          updates.push({
+            id:     r.record.id,
+            fields: {
+              'Contact Info':   buildContactInfo(contact.name, contact.title, contact.email, contact.linkedin_url),
+              'Email Verified': contact.email ? 'Unverified' : '',
+              'Status':         newStatus
+            }
+          });
+        }
+      } else {
+        console.log(`  ✗ No contact found — leaving as Research Needed`);
+        ncStats.notFound++;
+      }
+      await new Promise(r => setTimeout(r, 500));
     }
-    await new Promise(r => setTimeout(r, 500));
+
+    if (ncIdx % 50 === 0) {
+      const pct = Math.round((ncIdx / noContact.length) * 100);
+      console.log(`\n[Progress — NoContact] ${ncIdx} / ${noContact.length} (${pct}%) processed\n`);
+    }
   }
 
   // ── 3. GOOD CONTACTS — Hunter email verification ──────────────────────────
@@ -610,50 +660,57 @@ async function run() {
     console.log(SEP);
   }
 
-  const vStats = { verified: 0, risky: 0, undeliverable: 0, unknown: 0 };
+  const vStats = { verified: 0, risky: 0, undeliverable: 0, unknown: 0, domainMismatch: 0 };
 
+  let vIdx = 0;
   for (const r of needsVerify) {
+    vIdx++;
     // Domain validation first — catch emails from wrong company
     if (r.website && !isEmailDomainValid(r.email, r.website)) {
       console.log(`\n[Verify] ${r.companyName} — ✗ domain mismatch: ${r.email} vs ${r.website} — marking Needs Review`);
+      vStats.domainMismatch++;
       if (!isDryRun) {
         updates.push({ id: r.record.id, fields: { 'Status': 'Needs Review', 'Email Verified': 'Unverified' } });
       }
-      continue;
+    } else {
+      console.log(`\n[Verify] ${r.companyName} — ${r.email}`);
+      const result = await hunterVerify(r.email);
+      console.log(`  Hunter: ${result}`);
+
+      let emailVerifiedValue;
+      let markNeedsReview = false;
+      switch (result) {
+        case 'deliverable':
+          emailVerifiedValue = 'Verified';
+          vStats.verified++;
+          break;
+        case 'risky':
+          emailVerifiedValue = 'Risky (Flagged)';
+          vStats.risky++;
+          break;
+        case 'undeliverable':
+          emailVerifiedValue = 'Unverified';
+          markNeedsReview    = true;
+          vStats.undeliverable++;
+          break;
+        default:
+          emailVerifiedValue = 'Unverified';
+          vStats.unknown++;
+          break;
+      }
+
+      if (!isDryRun) {
+        const fields = { 'Email Verified': emailVerifiedValue };
+        if (markNeedsReview) fields['Status'] = 'Needs Review';
+        updates.push({ id: r.record.id, fields });
+      }
+      await new Promise(r => setTimeout(r, 500));
     }
 
-    console.log(`\n[Verify] ${r.companyName} — ${r.email}`);
-    const result = await hunterVerify(r.email);
-    console.log(`  Hunter: ${result}`);
-
-    let emailVerifiedValue;
-    let markNeedsReview = false;
-    switch (result) {
-      case 'deliverable':
-        emailVerifiedValue = 'Verified';
-        vStats.verified++;
-        break;
-      case 'risky':
-        emailVerifiedValue = 'Risky (Flagged)';
-        vStats.risky++;
-        break;
-      case 'undeliverable':
-        emailVerifiedValue = 'Unverified';
-        markNeedsReview    = true;
-        vStats.undeliverable++;
-        break;
-      default:
-        emailVerifiedValue = 'Unverified';
-        vStats.unknown++;
-        break;
+    if (vIdx % 50 === 0) {
+      const pct = Math.round((vIdx / needsVerify.length) * 100);
+      console.log(`\n[Progress — Verify] ${vIdx} / ${needsVerify.length} (${pct}%) processed\n`);
     }
-
-    if (!isDryRun) {
-      const fields = { 'Email Verified': emailVerifiedValue };
-      if (markNeedsReview) fields['Status'] = 'Needs Review';
-      updates.push({ id: r.record.id, fields });
-    }
-    await new Promise(r => setTimeout(r, 500));
   }
 
   // ── Write all Airtable updates ────────────────────────────────────────────
@@ -680,6 +737,9 @@ async function run() {
   console.log(`   Replaced:               ${wrStats.replaced}`);
   console.log(`   Needs Review:           ${wrStats.needsReview}`);
   console.log(`   Skipped (no domain):    ${wrStats.skipped}`);
+  console.log(`   Employment status:      ${wrStats.employmentStatusRejected}`);
+  console.log(`   MLM/distributor:        ${wrStats.mlmRejected}`);
+  console.log(`   Incomplete name:        ${wrStats.nameIncomplete}`);
   console.log('');
   console.log(`🔍 No Contact (${noContact.length}):`);
   console.log(`   Contact found:          ${ncStats.found}`);
@@ -691,6 +751,23 @@ async function run() {
   console.log(`   Risky (Flagged):        ${vStats.risky}`);
   console.log(`   Undeliverable:          ${vStats.undeliverable}`);
   console.log(`   Unknown:                ${vStats.unknown}`);
+  console.log(`   Domain mismatch:        ${vStats.domainMismatch}`);
+  console.log('');
+  console.log('── FLAT TOTALS ──');
+  const totalProcessed = wrongRole.length + noContact.length + needsVerify.length;
+  console.log(`Total records processed:          ${totalProcessed}`);
+  console.log(`Name incomplete:                  ${wrStats.nameIncomplete}`);
+  console.log(`Employment status rejected:       ${wrStats.employmentStatusRejected}`);
+  console.log(`MLM/distributor rejected:         ${wrStats.mlmRejected}`);
+  console.log(`Title rejected (wrong role):      ${wrStats.needsReview}`);
+  console.log(`Domain mismatch:                  ${vStats.domainMismatch}`);
+  console.log(`Email verified (deliverable):     ${vStats.verified}`);
+  console.log(`Email risky (flagged):            ${vStats.risky}`);
+  console.log(`Email undeliverable:              ${vStats.undeliverable}`);
+  console.log(`Email unknown (Hunter error):     ${vStats.unknown}`);
+  console.log(`Contacts replaced:                ${wrStats.replaced}`);
+  console.log(`New contacts found:               ${ncStats.found}`);
+  console.log(`Skipped (no domain):              ${wrStats.skipped + ncStats.skipped}`);
   console.log(SEP);
 }
 

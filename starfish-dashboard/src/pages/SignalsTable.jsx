@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import api from '../lib/api'
 import { parseContactInfo } from '../lib/parseContact'
 import { PAGE_SIZE, PRIORITY_RANK } from '../lib/constants'
@@ -19,22 +19,34 @@ function formatDate(dateStr) {
 
 export default function SignalsTable() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [signals, setSignals]   = useState([])
   const [total, setTotal]       = useState(0)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
   const [filters, setFilters]   = useState({ types: [], priorities: [] })
   const [sortBy, setSortBy]     = useState('airtable') // 'airtable' | 'date' | 'priority'
-  const [page, setPage]         = useState(1)
+  const [page, setPage]         = useState(() => {
+    const p = parseInt(searchParams.get('page'))
+    return p > 0 ? p : 1
+  })
 
   // Tracks the latest request so stale responses from older filter changes are ignored
   const requestIdRef = useRef(0)
+  // Tracks whether filters have changed after the initial mount
+  const isFirstFilterRun = useRef(true)
 
   // Re-fetch from server whenever filters change — server applies type/priority filters
   useEffect(() => {
     setLoading(true)
     setError(null)
-    setPage(1)
+    // Only reset to page 1 when the user actively changes a filter, not on initial mount
+    // (on mount we want to restore the page from the URL)
+    if (isFirstFilterRun.current) {
+      isFirstFilterRun.current = false
+    } else {
+      setPage(1)
+    }
 
     const thisRequestId = ++requestIdRef.current
     const params = new URLSearchParams()
@@ -62,8 +74,21 @@ export default function SignalsTable() {
     return () => controller.abort()
   }, [filters])
 
+  // Keep ?page=N in the URL so the Back button restores the correct page
+  useEffect(() => {
+    if (page === 1) {
+      setSearchParams(prev => { prev.delete('page'); return prev }, { replace: true })
+    } else {
+      setSearchParams(prev => { prev.set('page', String(page)); return prev }, { replace: true })
+    }
+  }, [page]) // eslint-disable-line react-hooks/exhaustive-deps
+
   function handleStatusChange(id, newStatus) {
     setSignals(prev => prev.map(s => s.id === id ? { ...s, status: newStatus } : s))
+  }
+
+  function handlePushed(id) {
+    setSignals(prev => prev.map(s => s.id === id ? { ...s, hubspot_pushed: true } : s))
   }
 
   function handleSortChange(newSort) {
@@ -189,6 +214,7 @@ export default function SignalsTable() {
                       contactName={name}
                       contactTitle={title}
                       onStatusChange={(newStatus) => handleStatusChange(signal.id, newStatus)}
+                      onPushed={() => handlePushed(signal.id)}
                     />
                   )
                 })}
@@ -236,7 +262,7 @@ export default function SignalsTable() {
   )
 }
 
-function TableRow({ signal, rowNumber, onClick, contactName, contactTitle, onStatusChange }) {
+function TableRow({ signal, rowNumber, onClick, contactName, contactTitle, onStatusChange, onPushed }) {
   const [hovered, setHovered] = useState(false)
 
   return (
@@ -355,6 +381,9 @@ function TableRow({ signal, rowNumber, onClick, contactName, contactTitle, onSta
         <HubSpotButton
           signalId={signal.id}
           alreadyPushed={signal.hubspot_pushed}
+          bespoke={signal.bespoke}
+          bespokeReason={signal.bespoke_reason}
+          onPushed={onPushed}
         />
       </td>
     </tr>

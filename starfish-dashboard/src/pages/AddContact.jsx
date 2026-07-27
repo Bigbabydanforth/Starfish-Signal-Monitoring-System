@@ -8,6 +8,7 @@ const SIGNAL_TYPES = [
   'Website Visitor',
   'News/Press',
   'Rebrand',
+  'Funding',
 ]
 
 const NOTES_MAX = 2000
@@ -78,6 +79,9 @@ export default function AddContact() {
   const [errors, setErrors]   = useState(EMPTY_ERRORS)
   const [status, setStatus]   = useState(null)    // null | 'loading' | 'success' | 'error'
   const [banner, setBanner]   = useState('')
+  const [acquiredCompany,      setAcquiredCompany]      = useState('')
+  const [acquiredCompanyError, setAcquiredCompanyError] = useState('')
+  const [hubspotContactUrl,    setHubspotContactUrl]    = useState(null)
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -91,6 +95,9 @@ export default function AddContact() {
   function resetForm() {
     setForm(EMPTY_FORM)
     setErrors(EMPTY_ERRORS)
+    setAcquiredCompany('')
+    setAcquiredCompanyError('')
+    setHubspotContactUrl(null)
   }
 
   // ── Client-side validation ────────────────────────────────────────────────
@@ -116,6 +123,11 @@ export default function AddContact() {
       valid = false
     }
 
+    if (form.signalType === 'M&A Activity' && !acquiredCompany.trim()) {
+      setAcquiredCompanyError('Acquired Company is required for M&A signals')
+      valid = false
+    }
+
     setErrors(errs)
     return valid
   }
@@ -131,26 +143,28 @@ export default function AddContact() {
     setBanner('')
 
     try {
-      await api.post('/api/contacts/add', {
-        firstName:      form.firstName.trim(),
-        lastName:       form.lastName.trim(),
-        email:          form.email.trim(),
-        title:          form.title.trim(),
-        companyName:    form.companyName.trim(),
-        companyWebsite: form.companyWebsite.trim() || undefined,
-        industry:       form.industry.trim()       || undefined,
-        signalType:     form.signalType,
-        priority:       form.priority,
-        notes:          form.notes.trim()          || undefined,
+      const res = await api.post('/api/contacts/add', {
+        firstName:       form.firstName.trim(),
+        lastName:        form.lastName.trim(),
+        email:           form.email.trim(),
+        title:           form.title.trim(),
+        companyName:     form.companyName.trim(),
+        companyWebsite:  form.companyWebsite.trim() || undefined,
+        industry:        form.industry.trim()       || undefined,
+        signalType:      form.signalType,
+        priority:        form.priority,
+        notes:           form.notes.trim()          || undefined,
+        acquiredCompany: form.signalType === 'M&A Activity' ? acquiredCompany.trim() : undefined,
       })
 
+      setHubspotContactUrl(res.data.hubspotContactUrl || null)
       setStatus('success')
-      setBanner('Contact added successfully. Pushed to HubSpot ✓')
+      setBanner('Contact created and pushed to HubSpot')
       setTimeout(() => {
         resetForm()
         setStatus(null)
         setBanner('')
-      }, 3000)
+      }, 5000)
 
     } catch (err) {
       setStatus('error')
@@ -206,16 +220,25 @@ export default function AddContact() {
         {/* Status banner */}
         {status === 'success' && (
           <div style={{
-            padding: '13px 16px',
-            backgroundColor: '#f0fdf4',
-            border: '1px solid #86efac',
+            background: '#F0FDF4',
+            border: '1px solid #16A34A',
             borderRadius: '8px',
+            padding: '16px 20px',
             marginBottom: '24px',
-            fontSize: '14px',
-            color: '#166534',
-            fontWeight: 500,
           }}>
-            {banner}
+            <div style={{ color: '#15803D', fontWeight: 600, fontSize: '14px', marginBottom: hubspotContactUrl ? '6px' : 0 }}>
+              ✓ {banner}
+            </div>
+            {hubspotContactUrl && (
+              <a
+                href={hubspotContactUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ fontSize: '13px', color: '#004b5c', textDecoration: 'underline' }}
+              >
+                View contact in HubSpot →
+              </a>
+            )}
           </div>
         )}
         {status === 'error' && (
@@ -345,7 +368,13 @@ export default function AddContact() {
               <select
                 name="signalType"
                 value={form.signalType}
-                onChange={handleChange}
+                onChange={e => {
+                  handleChange(e)
+                  if (e.target.value !== 'M&A Activity') {
+                    setAcquiredCompany('')
+                    setAcquiredCompanyError('')
+                  }
+                }}
                 style={{ ...inputStyle(!!errors.signalType), cursor: 'pointer' }}
               >
                 <option value="">— Select —</option>
@@ -372,6 +401,29 @@ export default function AddContact() {
               {errors.priority && <p style={errorTextStyle}>{errors.priority}</p>}
             </div>
           </div>
+
+          {/* Acquired Company — M&A signals only */}
+          {form.signalType === 'M&A Activity' && (
+            <div style={{ marginBottom: '20px' }}>
+              <label style={labelStyle}>
+                Acquired Company <span style={{ color: '#dc2626' }}>*</span>{' '}
+                <span style={{ color: '#6da3ab', fontWeight: 400 }}>(required for M&A)</span>
+              </label>
+              <input
+                type="text"
+                value={acquiredCompany}
+                onChange={e => {
+                  setAcquiredCompany(e.target.value)
+                  if (e.target.value.trim()) setAcquiredCompanyError('')
+                }}
+                placeholder="Name of the company being acquired"
+                style={inputStyle(!!acquiredCompanyError)}
+              />
+              {acquiredCompanyError && (
+                <p style={errorTextStyle}>{acquiredCompanyError}</p>
+              )}
+            </div>
+          )}
 
           {/* Notes */}
           <div style={fieldStyle}>

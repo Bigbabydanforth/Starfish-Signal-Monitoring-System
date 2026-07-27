@@ -37,6 +37,8 @@ import { isFakeEmail, verifyEmail } from './utils/email_validator.js';
 import { getBreaker } from './utils/circuit_breaker.js';
 import { extractDomain, findEmailWithApollo, findEmailWithHunterPerson, findEmailWithHunterDomain, HUNTER_BSI_TITLE_KEYWORDS, HUNTER_BSI_DEPT_KEYWORDS } from './utils/email_enrichment.js';
 import { pushSignalToHubSpot } from '../hubspot/pushSignalToHubSpot.js';
+import { generateClaudeEmails } from '../hubspot/generateClaudeEmails.js';
+import { findBroadcastContacts, getSendDay } from './utils/broadcast_contacts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -44,7 +46,7 @@ const TMP_DIR = resolve(__dirname, '../.tmp');
 
 // ── BSI strict title allowlist ────────────────────────────────────────────────
 // Only contacts matching these roles are allowed into Airtable for BSI signals.
-// Protects Carly's time and keeps the database clean — drop anything else.
+// Protects the team's time and keeps the database clean — drop anything else.
 // Marketing/brand leadership, senior C-suite (own the brand budget), and
 // communications leaders. Finance, ops-only, HR, tech, legal, etc. are excluded.
 const BSI_ALLOWED_TITLE_KEYWORDS = [
@@ -343,6 +345,33 @@ const REJECTED_TITLE_WORDS = [
   'in transition',           // "Currently in Transition" — between roles
   // Customer/partner success — account management, not marketing leadership
   'partner success',         // "Partner Success Specialist", "Partner Success Manager"
+  // Additional function words caught from production review (July 2026)
+  'solution consulting',     // "VP Global Solution Consulting" — pre-sales consulting, not marketing
+  'cargo',                   // "VP Cargo Northwest" — logistics ops
+  'rdi',                     // "VP of RDI" (Research Development Innovation) — R&D ops
+  'fsqa',                    // "VP FSQA" (Food Safety Quality Assurance) — food ops/QA
+  'food safety',             // "VP Food Safety" — food ops/QA
+  'service strategy',        // "VP Service Strategy" — customer service ops
+  // Junior/support VP variants not yet covered
+  'associate vice president', // written-out form of "associate VP" — pairs with 'associate vp'
+  // Liaison / staff roles
+  'executive liaison',        // "Executive Liaison" — support/coordination, not a decision-maker
+  'chief of staff',           // "Chief of Staff" — operational support role
+  // Insurance specialty / treaty roles
+  'vp specialty',             // "VP Specialty" — insurance specialty division role
+  'marketing manager treaty', // "Marketing Manager Treaty" — reinsurance treaty role, not brand
+  'insurance agent',          // "Insurance Agent" — individual sales rep, not brand leadership
+  // Creative/copy production (not brand strategy)
+  'copy director',            // "Copy Director" — creative production, not brand leadership
+  'creative director',        // "Creative Director" — agency production role, not CMO-equivalent
+  // Account/relationship management
+  'client services',          // "Director of Client Services" — account management
+  'relationship manager',     // "Relationship Manager" — sales/banking role
+  // Operational manager titles
+  'property manager',         // "Property Manager" — real estate ops
+  'support manager',          // "Support Manager" — customer support ops
+  'service manager',          // "Service Manager" — customer service ops
+  'quality manager',          // "Quality Manager" — QA/ops role
 ];
 
 // Core marketing title substrings that override REJECTED_TITLE_WORDS.
@@ -407,7 +436,7 @@ const MARKETING_TITLE_KEYWORDS = BSI_ALLOWED_TITLE_KEYWORDS.filter(
 );
 
 // Maximum broadcast contacts kept per company for BSI signals.
-// Keeps the Airtable queue manageable and prevents one company flooding Carly's inbox.
+// Keeps the Airtable queue manageable and prevents one company flooding the team's inbox.
 const MAX_CONTACTS_PER_COMPANY = 4;
 
 // ── Title classification helpers ─────────────────────────────────────────────
@@ -416,8 +445,16 @@ const MAX_CONTACTS_PER_COMPANY = 4;
 // Does NOT include CEO/COO/President — those are handled separately by isTitleCSuite().
 // Shared prefix check (JUNIOR_TITLE_WORDS, REJECTED_TITLE_WORDS, data) runs first so
 // "Marketing Coordinator" or "VP of Sales" never leaks through on a keyword match.
-function isTitleApproved(title) {
+function isTitleApproved(title, companyName = '') {
   if (!title) return false;
+  // Employment status check — runs first, before CMO/override, so
+  // "Seeking New Opportunity | Former CMO" is rejected unconditionally.
+  if (isEmploymentStatusRejected(title)) {
+    console.log(`[Title Filter] Employment status rejected: "${title}"`);
+    return false;
+  }
+  // MLM check — reject distributor ranks at known MLM companies before any approval.
+  if (companyName && isMLMDistributor(title, companyName)) return false;
   // raw_t: normalized but WITH parenthetical content — used for REJECTED checks so that
   // "Europe (People) Partner" → raw_t contains "people" and matches 'people partner'.
   const raw_t = title.toLowerCase().trim()
@@ -502,8 +539,12 @@ function isTitleApproved(title) {
 // fewer than MAX_CONTACTS_PER_COMPANY approved marketing contacts exist.
 // Word-boundary regex prevents 'coo' matching 'coordinator', 'president' matching
 // 'vice president of operations', etc.
-function isTitleCSuite(title) {
+function isTitleCSuite(title, companyName = '') {
   if (!title) return false;
+  // Employment status check — reject "Seeking | Former CEO" etc.
+  if (isEmploymentStatusRejected(title)) return false;
+  // MLM check — a "CEO" at an MLM with a distributor-rank title is still not a real exec.
+  if (companyName && isMLMDistributor(title, companyName)) return false;
   // raw_t keeps parenthetical content for HARD/JUNIOR/REJECTED checks (same as isTitleApproved).
   const raw_t = title.toLowerCase().trim()
     .replace(/-/g, ' ')
@@ -626,27 +667,189 @@ function isSeniorEnough(title) {
   );
 }
 
+// ── EMPLOYMENT STATUS REJECTION ────────────────────────────────────────────
+
+const EMPLOYMENT_STATUS_REJECTION_WORDS = [
+  'seeking new opportunity',
+  'seeking opportunities',
+  'seeking next opportunity',
+  'open to work',
+  'open to opportunities',
+  'in transition',
+  'self-employed',
+  'freelance',
+  'freelancer',
+  'independent consultant',
+  'independent contractor',
+  'available for hire',
+  'looking for new role',
+  'exploring opportunities'
+];
+
+/**
+ * isEmploymentStatusRejected()
+ *
+ * Returns true if the contact's title indicates they are not currently
+ * employed at a company (job-seeking, freelancing, self-employed).
+ *
+ * These contacts must be rejected regardless of any other title content.
+ * A "Seeking New Opportunity | Former CMO" must be rejected even though
+ * "CMO" appears in the string.
+ *
+ * @param {string} title
+ * @returns {boolean} true = REJECT this contact
+ */
+function isEmploymentStatusRejected(title) {
+  if (!title || typeof title !== 'string') return false;
+  const t = title.toLowerCase().trim();
+  return EMPLOYMENT_STATUS_REJECTION_WORDS.some(w => t.includes(w));
+}
+
+// ── MLM / DISTRIBUTOR REJECTION ─────────────────────────────────────────────
+
+// Known direct sales / MLM companies where title inflation is common.
+// "National Marketing Director" at a MLM is a distributor rank, not a real exec.
+const KNOWN_MLM_COMPANIES = [
+  'amway', 'herbalife', 'forever living', 'forever living products',
+  'avon', 'avon products',
+  'primerica',
+  'world financial group', 'wfg',
+  'symmetry financial', 'symmetry financial group',
+  'northwestern mutual',
+  'new york life',
+  'mass mutual', 'massmutual',
+  'globe life',
+  'php agency',
+  'family first life',
+  'american income life',
+  'transamerica',
+  'monat', 'monat global',
+  'isagenix',
+  'advocare',
+  'arbonne',
+  'younique',
+  'color street',
+  'scentsy',
+  'pampered chef',
+  'thirty one gifts',
+  'nu skin', 'nuskin',
+  '4life',
+  'it works',
+  'beachbody', 'team beachbody',
+  'life vantage', 'lifevantage',
+  'market america',
+  'usana',
+  'nerium', 'neora'
+];
+
+const MLM_TITLE_INDICATORS = [
+  'national marketing director',
+  'independent distributor',
+  'independent representative',
+  'independent associate',
+  'independent agent',
+  'independent business owner',
+  'ibo',
+  'qualified platinum',
+  'qualified director',
+  'diamond director',
+  'emerald',
+  'ruby director',
+  'sapphire',
+  'senior marketing director',
+  'executive marketing director'
+];
+
+/**
+ * isMLMDistributor()
+ *
+ * Returns true if the contact appears to be an MLM distributor or
+ * direct-sales agent with an inflated title — not a real brand/marketing executive.
+ *
+ * Two conditions must BOTH be true to reject:
+ * 1. The company name matches a known MLM/direct-sales company
+ * 2. The title contains an MLM rank indicator
+ *
+ * A real "Senior Marketing Director" at Nike passes this check (Nike is not an MLM).
+ * A "National Marketing Director" at Primerica fails (Primerica IS an MLM and the
+ * title is a distributor rank, not an executive role).
+ *
+ * @param {string} title
+ * @param {string} companyName
+ * @returns {boolean} true = REJECT this contact
+ */
+function isMLMDistributor(title, companyName) {
+  if (!title || !companyName) return false;
+  const t = title.toLowerCase().trim();
+  const c = companyName.toLowerCase().trim();
+
+  const isKnownMLM = KNOWN_MLM_COMPANIES.some(mlm => c.includes(mlm));
+  if (!isKnownMLM) return false;
+
+  const hasMlmTitle = MLM_TITLE_INDICATORS.some(indicator => t.includes(indicator));
+  if (hasMlmTitle) {
+    console.log(`[Title Filter] MLM/distributor rejected: "${title}" at "${companyName}"`);
+    return true;
+  }
+
+  return false;
+}
+
 // BSI contact allowlist gate — accepts marketing/brand/comms roles (isTitleApproved)
 // plus CEO/COO/President as last-resort fallback (isTitleCSuite).
 // Behaviour is identical to the original single-function implementation; the separation
 // exists so isTitleCSuite() can be used explicitly in the cap/priority logic.
-function isBSIAllowedTitle(title) {
-  return isTitleApproved(title) || isTitleCSuite(title);
+function isBSIAllowedTitle(title, companyName = '') {
+  return isTitleApproved(title, companyName) || isTitleCSuite(title, companyName);
 }
 
-// Returns true when a contact has a usable full name (first + last, no single-letter initials).
-// Single-letter last names ('S', 'K') are initials from bad data — Hunter person-finder
-// and email pattern construction both require a real last name to work correctly.
-// Also rejects obvious placeholder / junk names from bad API data.
-const JUNK_NAMES = new Set(['unknown', 'n/a', 'na', 'test', 'null']);
+// ── NAME COMPLETENESS CHECK ────────────────────────────────────────────────
+
+const PLACEHOLDER_NAMES = ['unknown', 'n/a', 'na', 'none', 'test', 'null', 'undefined', '-'];
+
+/**
+ * isNameComplete()
+ *
+ * Returns true only if the contact has both a usable first name and a usable
+ * last name. Rejects contacts with:
+ * - Missing first name or last name
+ * - First name is a single character (initial only)
+ * - Last name is a single character (initial only — e.g. "Adeline H")
+ * - Either name is only whitespace
+ * - Either name is a placeholder like "Unknown", "N/A", "None", "Test"
+ * - Either name part is purely numeric
+ *
+ * Accepts both { first_name, last_name } and { name } formats.
+ *
+ * @param {object} contact - { first_name, last_name } OR { name }
+ * @returns {boolean} true = name is complete and usable
+ */
 function isNameComplete(contact) {
-  const first = (contact.first_name || '').trim();
-  const last  = (contact.last_name  || '').trim();
-  if (!first || !last)               return false;
-  if (first.length <= 1)             return false;
-  if (last.length  <= 1)             return false;
-  if (JUNK_NAMES.has(first.toLowerCase())) return false;
-  if (JUNK_NAMES.has(last.toLowerCase()))  return false;
+  if (!contact || typeof contact !== 'object') return false;
+
+  let first = '';
+  let last  = '';
+
+  if (contact.first_name !== undefined || contact.last_name !== undefined) {
+    first = (contact.first_name || '').toString().trim();
+    last  = (contact.last_name  || '').toString().trim();
+  } else if (contact.name) {
+    const parts = contact.name.toString().trim().split(/\s+/);
+    first = parts[0]             || '';
+    last  = parts.slice(1).join(' ') || '';
+  } else {
+    return false;
+  }
+
+  if (!first || !last)       return false;
+  if (first.length <= 1)     return false;
+  if (last.length  <= 1)     return false;
+
+  const firstLower = first.toLowerCase();
+  const lastLower  = last.toLowerCase();
+  if (PLACEHOLDER_NAMES.includes(firstLower) || PLACEHOLDER_NAMES.includes(lastLower)) return false;
+  if (/^\d+$/.test(first) || /^\d+$/.test(last)) return false;
+
   return true;
 }
 
@@ -687,23 +890,57 @@ function isCorporateEmployee(contact) {
 // sibling country domains (john@sunlife.com.ph fails for sunlife.com — different entity).
 function isEmailDomainValid(email, companyWebsite) {
   if (!email || !companyWebsite) return false;
+  if (typeof email !== 'string' || typeof companyWebsite !== 'string') return false;
 
   const emailDomain = email.split('@')[1]?.toLowerCase().trim();
+
   const companyDomain = companyWebsite
     .replace(/https?:\/\//i, '')
     .replace(/^www\./i, '')
     .split('/')[0]
-    .toLowerCase().trim();
+    .toLowerCase()
+    .trim();
 
   if (!emailDomain || !companyDomain) return false;
 
-  // Accept exact match (john@sunlife.com → sunlife.com)
-  // or subdomain match (john@us.sunlife.com → sunlife.com).
-  const valid = emailDomain === companyDomain || emailDomain.endsWith('.' + companyDomain);
-  if (!valid) {
-    console.log(`  [DomainCheck] ❌ ${email} — domain "${emailDomain}" does not match company domain "${companyDomain}" — rejecting`);
+  // ── Exact match ───────────────────────────────────────────────────────────
+  if (emailDomain === companyDomain) return true;
+
+  // ── Subdomain match ───────────────────────────────────────────────────────
+  // e.g. us.company.com is a valid subdomain of company.com
+  // BUT: company.com.ph must NOT match company.com
+  // The fix: only accept the subdomain if the part after the dot is EXACTLY
+  // the company domain — meaning no additional TLD suffix follows it.
+  //
+  // Wrong (old): 'sunlife.com.ph'.endsWith('.sunlife.com') → true (BUG)
+  // Right (new): emailDomain must end with '.' + companyDomain AND nothing must
+  //              follow companyDomain (i.e. the companyDomain must be at the end)
+  if (emailDomain.endsWith('.' + companyDomain)) {
+    // Verify companyDomain is actually at the end of emailDomain with nothing after it
+    const afterCompanyDomain = emailDomain.slice(
+      emailDomain.lastIndexOf('.' + companyDomain) + ('.' + companyDomain).length
+    );
+    // afterCompanyDomain must be empty — if it has any characters, it's a different TLD
+    if (afterCompanyDomain === '') return true;
   }
-  return valid;
+
+  // ── Country-code TLD detection ─────────────────────────────────────────────
+  // If the email domain has a country-code TLD (e.g. .com.ph, .co.uk, .com.au),
+  // it is a national subsidiary — reject it even if the base name matches.
+  const KNOWN_COUNTRY_TLDS = [
+    '.com.ph', '.co.uk', '.com.au', '.co.nz', '.com.sg', '.com.hk',
+    '.com.my', '.co.in', '.com.br', '.com.mx', '.com.ar', '.co.za',
+    '.com.co', '.com.pe', '.com.vn', '.com.tw', '.co.jp', '.co.kr',
+    '.com.ng', '.co.ke', '.com.eg', '.co.id', '.com.tr', '.co.il'
+  ];
+  const hasCountryTLD = KNOWN_COUNTRY_TLDS.some(tld => emailDomain.endsWith(tld));
+  if (hasCountryTLD) {
+    console.log(`[Domain Validation]  Country-code TLD detected: ${emailDomain} — rejecting as foreign subsidiary`);
+    return false;
+  }
+
+  console.log(`[Domain Validation]  Mismatch: ${emailDomain} ≠ ${companyDomain}`);
+  return false;
 }
 
 
@@ -898,130 +1135,6 @@ async function apolloBroadcastSearch(domain) {
     }
   }
   return [];
-}
-
-// ── Broadcast contact search for non-BSI signals ──────────────────────────────
-// Reuses apolloBroadcastSearch (which already filters by title, name completeness,
-// employment, and unlocks emails) and adds per-contact email verification + send_day.
-// Returns up to maxContacts verified contact objects.
-// excludeEmail: skip a contact whose email matches Contact #1 (avoids duplicates).
-async function runBroadcastContacts(domain, companyName, maxContacts, excludeEmail) {
-  const contacts = [];
-  if (!domain) return contacts;
-
-  // Step 1: Apollo broadcast search — title-filtered, email-unlocked
-  if (!getBreaker('apollo').isOpen()) {
-    const apolloContacts = await apolloBroadcastSearch(domain);
-    for (const c of apolloContacts) {
-      if (contacts.length >= maxContacts) break;
-      if (!c.firstName?.trim()) continue;
-      // Dedup: skip if this is the same person as Contact #1
-      if (excludeEmail && c.email && c.email.toLowerCase() === excludeEmail.toLowerCase()) {
-        console.log(`  [Broadcast] ⏭️  ${c.firstName} ${c.lastName || ''} — same as Contact #1`);
-        continue;
-      }
-      const rawEmail = c.email && !isFakeEmail(c.email) ? c.email : null;
-      let verifiedEmail = null;
-      let emailVerification;
-      if (rawEmail) {
-        const src = c.email_status ? 'apollo' : 'hunter';
-        const result = await verifyEmail(rawEmail, src, c.email_status || null);
-        await new Promise(r => setTimeout(r, 300));
-        if (result.valid) {
-          verifiedEmail     = rawEmail;
-          emailVerification = result;
-          if (result.flagged) console.log(`  [Broadcast] ⚠️  ${rawEmail} flagged as risky (${result.reason})`);
-        } else {
-          console.log(`  [Broadcast] ❌ ${rawEmail} failed verification (${result.reason}) — keeping LinkedIn if available`);
-        }
-      }
-      // Drop contacts with no email AND no LinkedIn — completely unreachable
-      if (!verifiedEmail && !c.linkedin_url) continue;
-      if (!isNameComplete({ first_name: c.firstName, last_name: c.lastName })) {
-        console.log(`  [Broadcast] ⛔ ${c.firstName} ${c.lastName || ''} — incomplete name`);
-        continue;
-      }
-      if (!isCurrentlyEmployed({ title: c.title })) {
-        console.log(`  [Broadcast] ⛔ ${c.firstName} ${c.lastName || ''} (${c.title}) — not currently employed`);
-        continue;
-      }
-      if (!isCorporateEmployee({ title: c.title })) {
-        console.log(`  [Broadcast] ⛔ ${c.firstName} ${c.lastName || ''} (${c.title}) — MLM/distributor title`);
-        continue;
-      }
-      contacts.push({
-        first_name:        c.firstName,
-        last_name:         c.lastName        || '',
-        title:             c.title           || null,
-        email:             verifiedEmail,
-        email_flagged:     emailVerification?.flagged || undefined,
-        emailVerification: emailVerification          || null,
-        linkedin_url:      c.linkedin_url    || null,
-        source:            'apollo',
-        send_day:          assignSendDay(c.title)
-      });
-      console.log(`  [Broadcast] ➕ ${c.firstName} ${c.lastName || ''} (${c.title || 'Unknown'})${verifiedEmail ? ` → ${verifiedEmail}` : ' — LinkedIn only'}`);
-    }
-    await new Promise(r => setTimeout(r, 400));
-  }
-
-  // Step 2: Hunter domain-search fallback when Apollo returned nothing usable
-  if (contacts.length === 0 && process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen()) {
-    console.log(`  [Broadcast/Hunter] Apollo empty — trying Hunter domain-search at ${domain}...`);
-    try {
-      const hDomRes = await axios.get('https://api.hunter.io/v2/domain-search', {
-        params: { domain, api_key: process.env.HUNTER_API_KEY },
-        timeout: 15000
-      });
-      getBreaker('hunter').recordSuccess();
-      const hEmails     = hDomRes.data?.data?.emails || [];
-      const execMatches = hEmails.filter(e => isBSIAllowedTitle(e.position));
-      for (const e of execMatches) {
-        if (contacts.length >= maxContacts) break;
-        if (!e.first_name?.trim()) continue;
-        if (!isNameComplete({ first_name: e.first_name, last_name: e.last_name })) continue;
-        if (!isCurrentlyEmployed({ title: e.position })) continue;
-        if (!isCorporateEmployee({ title: e.position })) {
-          console.log(`  [Broadcast/Hunter] ⛔ ${e.first_name} ${e.last_name || ''} (${e.position}) — MLM/distributor title`);
-          continue;
-        }
-        const rawEmail = e.value && !isFakeEmail(e.value) ? e.value : null;
-        let verifiedEmail = null;
-        let emailVerification;
-        if (rawEmail) {
-          const { valid, flagged, reason } = await verifyEmail(rawEmail, 'hunter', null);
-          await new Promise(r => setTimeout(r, 300));
-          if (valid) { verifiedEmail = rawEmail; emailVerification = { valid, flagged, reason }; }
-        }
-        if (!verifiedEmail && !e.linkedin) continue;
-        contacts.push({
-          first_name:        e.first_name,
-          last_name:         e.last_name  || '',
-          title:             e.position   || null,
-          email:             verifiedEmail,
-          email_flagged:     emailVerification?.flagged || undefined,
-          emailVerification: emailVerification          || null,
-          linkedin_url:      e.linkedin   || null,
-          source:            'hunter',
-          send_day:          assignSendDay(e.position)
-        });
-        console.log(`  [Broadcast/Hunter] ➕ ${e.first_name} ${e.last_name || ''} (${e.position || 'Unknown'})${verifiedEmail ? ` → ${verifiedEmail}` : ' — LinkedIn only'}`);
-      }
-    } catch (err) {
-      const status = err.response?.status;
-      if (status === 429)      console.warn(`  [Broadcast/Hunter] ⏳ Rate limited (429) at ${domain}`);
-      else if (status === 401) console.warn(`  [Broadcast/Hunter] ❌ Hunter unauthorized (401)`);
-      else { console.warn(`  [Broadcast/Hunter] ⚠️  ${err.message}`); getBreaker('hunter').recordFailure(err.message); }
-    }
-    await new Promise(r => setTimeout(r, 400));
-  }
-
-  if (contacts.length > 0) {
-    console.log(`  [Broadcast] ✅ ${companyName} — ${contacts.length} additional contact(s) found at ${domain}`);
-  } else {
-    console.log(`  [Broadcast] ℹ️  ${companyName} — no additional contacts found at ${domain}`);
-  }
-  return contacts;
 }
 
 // ── Extract named person from a News/Press article ────────────────────────────
@@ -1326,8 +1439,8 @@ function formatSignalDetails(signal) {
       details += ` Broadcast contacts: ${signal.bsi_contacts.length} exec(s) identified.`;
     }
   }
-  else if (signal.type === 'News/Press') {
-    if (!signal.article) return '(News/Press — article data missing)';
+  else if (signal.type === 'News/Press' || signal.type === 'Funding') {
+    if (!signal.article) return `(${signal.type} — article data missing)`;
     details = signal.article.title || '';
     if (signal.article.description) details += '. ' + signal.article.description;
     details += ` (Published by ${signal.article.source || 'Unknown'} on ${formatShortDate(signal.article.published_at)})`;
@@ -1358,6 +1471,24 @@ function getEmailVerifiedStatus(verification) {
   if (verification.flagged === true)             return 'Risky (Flagged)';
   if (verification.valid   === true)             return 'Verified';
   return 'Unverified';
+}
+
+/**
+ * extractLinkedInFromContactInfo()
+ * Extracts a LinkedIn URL from a formatted Contact Info text string.
+ * Used as a fallback when the contact object does not have a standalone linkedinUrl.
+ *
+ * Contact Info format:
+ *   "Name: Jane Smith\nTitle: VP Marketing\nLinkedIn: https://linkedin.com/in/janesmith\nEmail: jane@co.com"
+ *
+ * @param {string} contactInfoText
+ * @returns {string|null}
+ */
+function extractLinkedInFromContactInfo(contactInfoText) {
+  if (!contactInfoText || typeof contactInfoText !== 'string') return null;
+  // Match "LinkedIn: " followed by a URL on the same line
+  const match = contactInfoText.match(/LinkedIn:\s*(https?:\/\/[^\s\n]+)/i);
+  return match ? match[1].trim() : null;
 }
 
 // ── Format a single BSI broadcast contact for the Airtable Contact Info field ──
@@ -1417,7 +1548,7 @@ function formatContactInfo(signal) {
 // broadcastContact: undefined = legacy single-contact signal (use formatContactInfo)
 //                  null      = broadcast ran but found nobody ("Contact Needed")
 //                  object    = one broadcast contact (BSI or non-BSI multi-contact expansion)
-function formatForAirtable(signal, broadcastContact) {
+function formatForAirtable(signal, broadcastContact, emailData = {}) {
   // Compute and cache Signal Details on the signal object before writing to Airtable.
   // Without this, workflow_4b (Sheets) and workflow_5 (email) never see what was written here
   // and fall back to their own simpler reconstruction logic — producing three different versions
@@ -1443,12 +1574,26 @@ function formatForAirtable(signal, broadcastContact) {
     signal._contactInfo = contactInfo;
   }
 
+  // LinkedIn URL resolution — priority order:
+  // 1. broadcastContact.linkedinUrl / linkedin_url — set from Apollo/Hunter enrichment
+  // 2. signal.person.linkedin_url — PDL/Apollo job-change signals
+  // 3. signal.source_url when it is a LinkedIn URL (PDL source URLs are LinkedIn profile URLs)
+  // 4. Parsed from the Contact Info text (fallback for older records)
+  const linkedInUrl = (broadcastContact && typeof broadcastContact === 'object'
+      ? (broadcastContact.linkedinUrl || broadcastContact.linkedin_url)
+      : null)
+    || signal.person?.linkedin_url
+    || (signal.source_url?.includes('linkedin.com') ? signal.source_url : null)
+    || extractLinkedInFromContactInfo(contactInfo)
+    || null;
+
   return {
     fields: {
       'Company Name':          signal.company.name,
       'Signal Type':           signal.type,
       'Signal Details':        signal.signalDetails,
       'Contact Info':          contactInfo,
+      'LinkedIn URL':          linkedInUrl || '',
       'Company Revenue':       signal.company.revenue || null,
       'Company Funding Stage': signal.company.funding_stage || null,
       'Industry':              signal.company.industry || null,
@@ -1468,16 +1613,66 @@ function formatForAirtable(signal, broadcastContact) {
                                  ? getEmailVerifiedStatus(broadcastContact.emailVerification)
                                  : getEmailVerifiedStatus(signal.emailVerification),
       // Send Day: 1–5 stagger for broadcast contacts (BSI and non-BSI). null for legacy single-contact signals.
-      'Send Day':              (broadcastContact && typeof broadcastContact === 'object') ? (broadcastContact.send_day || null) : null
+      'Send Day':              (broadcastContact && typeof broadcastContact === 'object') ? (broadcastContact.send_day || null) : null,
+      // Bespoke flag — set by Claude enrichment. Bespoke contacts require manual outreach, not sequences.
+      'Bespoke':               signal.bespoke === true,
+      'Bespoke Reason':        signal.bespoke_reason || '',
+
+      // Claude email generation fields.
+      // Pipeline path: populated here when CLAUDE_EMAILS_ENABLED=true and contact is Claude group.
+      // Dashboard path: defaults used here; pushSignalToHubSpot() backfills via updateRecords().
+      'Claude Generated':    emailData.claudeGenerated   || false,
+      'Claude Generated At': emailData.claudeGeneratedAt || null,
+      'AB Test Group':       emailData.abGroup           || null,
+      'Email 1 Subject':     emailData.emails?.email_1_subject || null,
+      'Email 1 Body':        emailData.emails?.email_1_body    || null,
+      'Email 2 Body':        emailData.emails?.email_2_body    || null,
+      'Email 3 Body':        emailData.emails?.email_3_body    || null,
+      'Email 4 Body':        emailData.emails?.email_4_body    || null,
+      'Email 5 Body':        emailData.emails?.email_5_body    || null,
+      'Email 6 Body':        emailData.emails?.email_6_body    || null,
+      'Email 7 Body':        emailData.emails?.email_7_body    || null,
     }
   };
+}
+
+// ── Claude email generation (pipeline path) ───────────────────────────────────
+// Controlled by CLAUDE_EMAILS_ENABLED env var. Set to false initially.
+// Only enable after confirming the system works end-to-end in testing.
+// CLAUDE_API_KEY check prevents accidental charges if the key is missing.
+const claudeEmailsEnabled = !!process.env.CLAUDE_API_KEY && process.env.CLAUDE_EMAILS_ENABLED === 'true';
+
+// Generates Claude emails for one contact and returns an emailData object for
+// use in formatForAirtable(). Non-fatal — failures fall back to Starfish group.
+async function generateEmailData(signal, contact) {
+  if (!claudeEmailsEnabled || signal.bespoke) return {};
+
+  const abGroup = Math.random() < 0.75 ? 'starfish' : 'claude';
+  // Store on signal so Step 4.7 auto-push can read it without re-assigning randomly.
+  signal.ab_test_group = abGroup;
+  if (abGroup !== 'claude') return { abGroup: 'starfish' };
+
+  const emailResult = await generateClaudeEmails(signal, contact);
+  if (emailResult.success) {
+    console.log(`[Workflow 4] Claude emails generated for ${signal.company?.name || signal.company_name || '?'}`);
+    return {
+      abGroup:           'claude',
+      claudeGenerated:   true,
+      claudeGeneratedAt: new Date().toISOString(),
+      emails:            emailResult.emails,
+    };
+  }
+
+  console.log(`[Workflow 4] Claude generation failed, falling back to Starfish: ${emailResult.error}`);
+  signal.ab_test_group = 'starfish'; // override to starfish since Claude generation failed
+  return { abGroup: 'starfish' };
 }
 
 // ── Expand signals to Airtable records ────────────────────────────────────────
 // BSI signals expand to one record per broadcast contact (or one "Contact Needed" record).
 // Non-BSI signals with broadcast_contacts also expand one record per contact.
 // Signals without broadcast_contacts (e.g. enrichment failed) map 1-to-1 (legacy path).
-function expandToRecords(signals) {
+async function expandToRecords(signals) {
   const records = [];
   for (const signal of signals) {
     if (signal.type === 'Brand Strategy Intent') {
@@ -1486,7 +1681,8 @@ function expandToRecords(signals) {
         // one signal expanding to 10+ records would overflow a single batch and cause failures.
         const contacts = signal.bsi_contacts.slice(0, 5);
         for (const contact of contacts) {
-          const record = sanitizeAirtableRecord(formatForAirtable(signal, contact));
+          const emailData = await generateEmailData(signal, contact);
+          const record = sanitizeAirtableRecord(formatForAirtable(signal, contact, emailData));
           if (record) records.push(record);
         }
       } else {
@@ -1495,36 +1691,30 @@ function expandToRecords(signals) {
       }
     } else if (signal.broadcast_contacts !== undefined) {
       // Non-BSI broadcast expansion — one record per contact.
-      const allContacts = [];
-
-      // Job Change: job-changer themselves = Contact #1 (send_day 1)
-      if (signal.type === 'Job Change' && signal.person?.first_name) {
-        allContacts.push({
-          first_name:        signal.person.first_name,
-          last_name:         signal.person.last_name   || '',
-          title:             signal.person.title        || null,
-          email:             signal.person.email        || signal._puppeteer_email || null,
-          email_flagged:     signal._email_flagged      || undefined,
-          emailVerification: signal.emailVerification   || null,
-          linkedin_url:      signal.person.linkedin_url || null,
-          source:            'audiencelab',
-          send_day:          1  // job-changer is always the first touchpoint
-        });
-      }
-
-      // Append broadcast contacts (max 3 additional for Job Change; max 4 for all others)
-      const maxBroadcast = signal.type === 'Job Change' ? 3 : 4;
-      for (const c of (signal.broadcast_contacts || []).slice(0, maxBroadcast)) {
-        allContacts.push(c);
-      }
+      // broadcast_contacts already includes the fixedContact (job-changer) at index 0
+      // when applicable — findBroadcastContacts() handles that internally.
+      const allContacts = (signal.broadcast_contacts || []).slice(0, 4);
 
       if (allContacts.length > 0) {
         for (const contact of allContacts) {
-          const record = sanitizeAirtableRecord(formatForAirtable(signal, contact));
+          // Name completeness check — cheapest gate, runs before domain/email checks
+          if (!isNameComplete({ first_name: contact.first_name, last_name: contact.last_name })) {
+            console.log(`[Workflow 4] Incomplete name rejected: first="${contact.first_name || ''}" last="${contact.last_name || ''}" — skipping`);
+            continue;
+          }
+          // domain validation confirmed — skip contacts whose email belongs to a different domain
+          if (contact.email && signal.company?.website) {
+            if (!isEmailDomainValid(contact.email, signal.company.website)) {
+              console.log(`[Workflow 4] Domain mismatch — skipping contact: ${contact.email} for ${signal.company?.name}`);
+              continue;
+            }
+          }
+          const emailData = await generateEmailData(signal, contact);
+          const record = sanitizeAirtableRecord(formatForAirtable(signal, contact, emailData));
           if (record) records.push(record);
         }
       } else {
-        // Broadcast ran but found nobody — save one "Contact Needed" record
+        // Broadcast ran but found nobody — save one "Contact Needed" record (no email to validate)
         const record = sanitizeAirtableRecord(formatForAirtable(signal, null));
         if (record) records.push(record);
       }
@@ -1580,6 +1770,10 @@ function sanitizeAirtableRecord(record) {
 function extractHubSpotContacts(signal) {
   const type = signal.type;
 
+  // ab_test_group was assigned during generateEmailData() and stored on signal.
+  // Pass it through so pushSignalToHubSpot uses the same group as Airtable — not a new random pick.
+  const abGroup = signal.ab_test_group === 'claude' ? 'claude' : 'starfish';
+
   if (type === 'Brand Strategy Intent') {
     return (signal.bsi_contacts || [])
       .filter(c => c.email)
@@ -1589,6 +1783,8 @@ function extractHubSpotContacts(signal) {
         title:        c.title        || '',
         send_day:     c.send_day     || 1,
         email_source: 'AudienceLab',
+        linkedin_url: c.linkedin_url || '',
+        abGroup,
       }));
   }
 
@@ -1601,6 +1797,8 @@ function extractHubSpotContacts(signal) {
         title:        c.title        || '',
         send_day:     1,
         email_source: 'Apollo', // M&A contacts come from fetchMaCSuite() which queries Apollo
+        linkedin_url: c.linkedin_url || '',
+        abGroup,
       }));
   }
 
@@ -1615,7 +1813,43 @@ function extractHubSpotContacts(signal) {
     title:        signal.person?.title || '',
     send_day:     1,
     email_source: signal.person?.email ? 'Apollo' : 'Puppeteer',
+    linkedin_url: signal.person?.linkedin_url || '',
+    abGroup,
   }];
+}
+
+// --- Contact completeness gate ---
+// All 7 conditions must pass for a contact to be auto-pushed to HubSpot.
+// Bespoke signals are always excluded — no exceptions.
+function isContactComplete(signal, contact) {
+  // 1. Email: exists, contains @, not fake
+  if (!contact.email || !contact.email.includes('@') || isFakeEmail(contact.email)) return false;
+
+  // 2. First name parseable from contact.name, not single character
+  const firstName = (contact.name || '').trim().split(/\s+/)[0] || '';
+  if (!firstName || firstName.length <= 1) return false;
+
+  // 3. Company name: exists, not empty
+  const companyName = signal.company_name || signal.company?.name || '';
+  if (!companyName.trim()) return false;
+
+  // 4. Industry: exists, not blank, not "Unknown"
+  const industry = signal.industry || signal.company?.industry || '';
+  if (!industry.trim() || industry.trim().toLowerCase() === 'unknown') return false;
+
+  // 5. send_day: number 1–5
+  const sendDay = contact.send_day;
+  if (typeof sendDay !== 'number' || sendDay < 1 || sendDay > 5) return false;
+
+  // 6. Not bespoke
+  if (signal.bespoke === true) return false;
+
+  // 7. M&A signals must have acquired_company or deal.seller
+  if (signal.type === 'M&A Activity') {
+    if (!(signal.acquired_company || signal.deal?.seller)) return false;
+  }
+
+  return true;
 }
 
 // --- Main Workflow ---
@@ -1738,7 +1972,7 @@ async function saveToAirtable(deduplicatedSignals) {
     // Tier 1: AL sent the right person WITH a valid email → use them, done.
     // Tier 2: Find ONE marketing/brand decision-maker ourselves → one record.
     // Tier 3: Can't find marketing person → broadcast to up to 5 senior leaders.
-    // Tier 4: All cascades exhausted → flag "Contact Needed" for Carly.
+    // Tier 4: All cascades exhausted → flag "Contact Needed" for manual research.
     //
     // signal.person is always cleared — contacts live in signal.bsi_contacts[].
     if (signal.type === 'Brand Strategy Intent') {
@@ -1752,7 +1986,7 @@ async function saveToAirtable(deduplicatedSignals) {
 
       // ── TIER 1: AL sent the right person with a valid email ─────────────────
       // Perfect case — one contact, one record, no APIs needed.
-      if (alPerson?.first_name && alTitleIsBrandMarketing) {
+      if (alPerson?.first_name && alTitleIsBrandMarketing && isNameComplete({ first_name: alPerson.first_name, last_name: alPerson.last_name })) {
         if (alPerson.email && !isFakeEmail(alPerson.email) && isEmailDomainValid(alPerson.email, signal.company?.website)) {
           // T1 AudienceLab contacts are identity-resolved — isFakeEmail() gate only, no Hunter verifier.
           signal.bsi_contacts.push({
@@ -1793,6 +2027,9 @@ async function saveToAirtable(deduplicatedSignals) {
       if (bsiDomain && !getBreaker('apollo').isOpen()) {
         const exec = await apolloFindExec(bsiDomain, 'Brand Strategy Intent');
         if (exec) {
+          if (!isNameComplete({ first_name: exec.firstName, last_name: exec.lastName })) {
+            console.log(`  [BSI/T2] ⛔ Apollo contact ${exec.firstName} ${exec.lastName || ''} — incomplete name, skipping`);
+          } else {
           // If Apollo already unlocked an email, verify it before saving.
           let execEmail = null;
           let execEmailVerification;
@@ -1819,6 +2056,7 @@ async function saveToAirtable(deduplicatedSignals) {
             send_day:          assignSendDay(exec.title)
           });
           console.log(`  [BSI/T2] ✅ Apollo found: ${exec.firstName} ${exec.lastName} (${exec.title})${execEmail ? ` → ${execEmail}` : ' — no email yet, Hunter will follow'}`);
+          } // end isNameComplete else
         } else {
           console.log(`  [BSI/T2] ℹ️  Apollo found no marketing contact at ${bsiDomain} — trying Hunter...`);
         }
@@ -1827,7 +2065,7 @@ async function saveToAirtable(deduplicatedSignals) {
 
       // Step 2.2: Hunter person-finder for the AudienceLab contact — FIRST BACKUP
       // Only runs if Apollo found nothing AND AudienceLab gave us a person with the right title but no email.
-      if (signal.bsi_contacts.length === 0 && alPerson?.first_name && alTitleIsBrandMarketing && bsiDomain && process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen()) {
+      if (signal.bsi_contacts.length === 0 && alPerson?.first_name && alTitleIsBrandMarketing && isNameComplete({ first_name: alPerson.first_name, last_name: alPerson.last_name }) && bsiDomain && process.env.HUNTER_API_KEY && !getBreaker('hunter').isOpen()) {
         console.log(`  [BSI/T2] AL has ${alPerson.title} but no email — trying Hunter for ${alPerson.first_name} ${alPerson.last_name}...`);
         try {
           const hRes = await axios.get('https://api.hunter.io/v2/email-finder', {
@@ -1906,8 +2144,8 @@ async function saveToAirtable(deduplicatedSignals) {
             return HUNTER_BSI_TITLE_KEYWORDS.some(k => pos.includes(k)) ||
                    HUNTER_BSI_DEPT_KEYWORDS.some(k => dept.includes(k));
           });
-          // Reject contacts with no first name — a generic dept mailbox with no person is useless
-          if (bsiMatch && bsiMatch.first_name) {
+          // Reject contacts with incomplete name — no first name, single-letter last name, or junk data
+          if (bsiMatch && isNameComplete({ first_name: bsiMatch.first_name, last_name: bsiMatch.last_name })) {
             let bsiMatchEmail = null;
             let bsiMatchEmailFlagged;
             let bsiMatchEmailVerification;
@@ -2056,7 +2294,7 @@ async function saveToAirtable(deduplicatedSignals) {
             const t2Name = `${t2Contact.first_name} ${t2Contact.last_name}`.trim();
             console.log(`  [BSI/T2] ⛔ ${t2Name} (${t2Contact.title || 'Unknown Title'}) — MLM/distributor role — falling through to Tier 3`);
             signal.bsi_contacts = [];
-          } else if (!isBSIAllowedTitle(t2Contact.title)) {
+          } else if (!isBSIAllowedTitle(t2Contact.title, signal.company?.name)) {
             // Reachable but wrong role — drop and fall through to Tier 3
             const t2Name = `${t2Contact.first_name} ${t2Contact.last_name}`.trim();
             console.log(`  [BSI/T2] ⛔ ${t2Name} (${t2Contact.title || 'Unknown Title'}) — not a Starfish target role — falling through to Tier 3`);
@@ -2091,7 +2329,7 @@ async function saveToAirtable(deduplicatedSignals) {
             // Title gate — must be an approved marketing/brand role OR C-suite.
             // Without this check, wrong-role contacts (HR, engineers, recruiters) fill the
             // 5-contact cap and prevent Hunter Step 3.2 from running as a fallback.
-            if (!isBSIAllowedTitle(c.title)) {
+            if (!isBSIAllowedTitle(c.title, signal.company?.name)) {
               console.log(`  [BSI/T3] ⛔ Skipping ${c.firstName} ${c.lastName || ''} (${c.title || 'Unknown'}) — not a target role`);
               continue;
             }
@@ -2146,7 +2384,7 @@ async function saveToAirtable(deduplicatedSignals) {
             // Use isBSIAllowedTitle (approved marketing + C-suite) instead of
             // HUNTER_EXEC_TITLE_KEYWORDS substring match — that list contains 'president'
             // which is a substring of 'vice president', letting in VP Sales, VP HR, etc.
-            const execMatches = hEmails.filter(e => isBSIAllowedTitle(e.position));
+            const execMatches = hEmails.filter(e => isBSIAllowedTitle(e.position, signal.company?.name));
             for (const e of execMatches) {
               if (signal.bsi_contacts.length >= 5) break;
               if (!e.first_name?.trim()) continue; // skip contacts with no name — unreachable
@@ -2317,11 +2555,11 @@ async function saveToAirtable(deduplicatedSignals) {
       // Pass 2: if fewer than 3 marketing contacts survive, fill remaining slots with
       //         C-suite (CEO, COO, President) as last-resort fallback.
       // Anything that fails both passes is dropped. Cap at MAX_CONTACTS_PER_COMPANY.
-      const approvedContacts = signal.bsi_contacts.filter(c => isTitleApproved(c.title));
+      const approvedContacts = signal.bsi_contacts.filter(c => isTitleApproved(c.title, signal.company?.name));
       // C-suite (CEO/COO/President) only added when ZERO marketing contacts exist —
       // if even one CMO/VP Marketing is found, we don't pad with the CEO.
       const csuiteContacts   = approvedContacts.length === 0
-        ? signal.bsi_contacts.filter(c => isTitleCSuite(c.title))
+        ? signal.bsi_contacts.filter(c => isTitleCSuite(c.title, signal.company?.name))
         : [];
       const merged = [
         ...approvedContacts,
@@ -2333,7 +2571,7 @@ async function saveToAirtable(deduplicatedSignals) {
       for (const d of signal.bsi_contacts) {
         if (mergedSet.has(d)) continue;
         const dName = `${d.first_name || ''} ${d.last_name || ''}`.trim() || 'Unknown';
-        if (!isTitleApproved(d.title) && !isTitleCSuite(d.title)) {
+        if (!isTitleApproved(d.title, signal.company?.name) && !isTitleCSuite(d.title, signal.company?.name)) {
           console.log(`  [BSI/TitleFilter] ⛔ Dropping ${dName} (${d.title || 'Unknown Title'}) — not a Starfish target role`);
         } else {
           console.log(`  [BSI/Cap] ✂️  Capping at ${MAX_CONTACTS_PER_COMPANY}: dropping ${dName} (${d.title || 'Unknown Title'})`);
@@ -2345,7 +2583,7 @@ async function saveToAirtable(deduplicatedSignals) {
       }
       signal.bsi_contacts = merged;
 
-      // ── TIER 4: Nothing found → Contact Needed (Carly) ──────────────────────
+      // ── TIER 4: Nothing found → Contact Needed (manual research) ────────────
       const withEmail    = signal.bsi_contacts.filter(c => c.email).length;
       const withLinkedIn = signal.bsi_contacts.filter(c => c.linkedin_url && !c.email).length;
       if (signal.bsi_contacts.length === 0) {
@@ -2899,7 +3137,7 @@ async function saveToAirtable(deduplicatedSignals) {
       if (apolloExec?.firstName) {
         // Title gate — reject contacts that passed Apollo's soft filter but fail our strict check.
         // e.g. "VP Environment Health Safety" slips through Apollo's title search but must be blocked here.
-        if (apolloExec.title && !isTitleApproved(apolloExec.title) && !isTitleCSuite(apolloExec.title)) {
+        if (apolloExec.title && !isTitleApproved(apolloExec.title, signal.company?.name) && !isTitleCSuite(apolloExec.title, signal.company?.name)) {
           console.log(`  [Apollo/NP] ⛔ ${apolloExec.firstName} ${apolloExec.lastName} (${apolloExec.title}) — title not approved, falling through to Hunter domain search`);
         } else {
           console.log(`  [Apollo/NP] ✅ ${signal.company.name} → found ${apolloExec.firstName} ${apolloExec.lastName} (${apolloExec.title || 'exec'})`);
@@ -2983,7 +3221,7 @@ async function saveToAirtable(deduplicatedSignals) {
         // title check the rest of the pipeline uses so only approved contacts pass through.
         // Skip the check if title is absent — absence of title is not grounds for rejection.
         const hunterTitleOk = !hunterResult.title ||
-          isTitleApproved(hunterResult.title) || isTitleCSuite(hunterResult.title);
+          isTitleApproved(hunterResult.title, signal.company?.name) || isTitleCSuite(hunterResult.title, signal.company?.name);
         if (hunterResult.title && !hunterTitleOk) {
           console.log(`  [Hunter] ⛔ Skipping ${hunterResult.email} — title not approved: "${hunterResult.title}"`);
         } else {
@@ -3132,52 +3370,166 @@ async function saveToAirtable(deduplicatedSignals) {
     })));
   }
 
-  // ── Second pass: broadcast contact discovery for non-BSI signals ───────────
-  // Each signal type now expands to multiple Airtable records (one per contact).
-  // This pass runs AFTER the primary enrichment so Contact #1 (job-changer, article
-  // person, etc.) is already set — runBroadcastContacts() uses that email as excludeEmail
-  // to avoid duplicating them in the broadcast results.
-  //
-  // Job Change:              Contact #1 = job-changer (send_day 1) + up to 3 broadcast execs
-  // News/Press, Rebrand, WV: up to 4 broadcast contacts; excludes the single contact already found
-  // M&A Activity:            up to 4 broadcast contacts at the acquiring company
-  //
-  // Signals where broadcast_contacts is not set (BSI handled above, enrichment failed)
-  // are skipped here and fall through to the legacy 1-to-1 Airtable path in expandToRecords().
+  // ── Second pass: universal broadcast contact discovery ────────────────────────
+  // All non-BSI signal types now run broadcast contact search via findBroadcastContacts().
+  // Job Change: job-changer is fixedContact (always Contact #1, send_day 1).
+  // M&A: broadcast runs at both acquiring AND acquired company when domain is known.
+  // All others: broadcast at primary company, excluding any contact already found.
+  // Results are stored on signal.broadcast_contacts for expandToRecords().
   const broadcastCandidates = deduplicatedSignals.filter(s =>
     s.type !== 'Brand Strategy Intent' && !s._enrichment_failed
   );
 
   if (broadcastCandidates.length > 0) {
-    console.log(`[Airtable] Running broadcast contact discovery for ${broadcastCandidates.length} non-BSI signal(s)...`);
+    console.log(`[Airtable] Running universal broadcast contact discovery for ${broadcastCandidates.length} non-BSI signal(s)...`);
     for (let i = 0; i < broadcastCandidates.length; i += ENRICHMENT_CONCURRENCY) {
       const batch = broadcastCandidates.slice(i, i + ENRICHMENT_CONCURRENCY);
       await Promise.all(batch.map(async (signal) => {
         try {
-          const domain = extractDomain(signal.company?.website);
-          if (!domain) {
-            console.log(`  [Broadcast/${signal.type}] ⚠️  ${signal.company.name} — no domain, skipping`);
-            signal.broadcast_contacts = [];
-            return;
-          }
+          let broadcastResults = [];
 
-          console.log(`  [Broadcast/${signal.type}] ${signal.company.name} at ${domain}...`);
+          if (signal.type === 'M&A Activity') {
+            // ── M&A: broadcast at acquiring company ────────────────────────────
+            const acquirerDomain = extractDomain(signal.company?.website);
+            if (acquirerDomain) {
+              const acquirerContacts = await findBroadcastContacts({
+                domain:         acquirerDomain,
+                companyName:    signal.company.name,
+                companyWebsite: signal.company.website,
+                signalType:     signal.type,
+                fixedContact:   null
+              });
+              broadcastResults.push(...acquirerContacts.map(c => ({ ...c, targetCompany: 'acquirer', companyName: signal.company.name })));
+            }
 
-          if (signal.type === 'Job Change') {
-            // Contact #1 is the job-changer themselves (already in signal.person).
-            // Broadcast finds up to 3 additional execs at their new company.
-            const excludeEmail = signal.person?.email || signal._puppeteer_email || null;
-            signal.broadcast_contacts = await runBroadcastContacts(domain, signal.company.name, 3, excludeEmail);
-          } else if (signal.type === 'M&A Activity') {
-            // Broadcast finds exec contacts at the acquiring company.
-            // (Acquired company domain not available in the signal — not searched.)
-            signal.broadcast_contacts = await runBroadcastContacts(domain, signal.company.name, 4, null);
+            // ── M&A: also broadcast at acquired/target company if domain known ──
+            const targetName    = signal.deal?.seller || signal.acquired_company || null;
+            const targetWebsite = signal.acquired_company_website || null;
+            const targetDomain  = targetWebsite ? extractDomain(targetWebsite) : null;
+            if (targetDomain && targetName) {
+              console.log(`  [Broadcast/M&A] Also searching acquired company: ${targetName}`);
+              const targetContacts = await findBroadcastContacts({
+                domain:         targetDomain,
+                companyName:    targetName,
+                companyWebsite: targetWebsite,
+                signalType:     signal.type,
+                fixedContact:   null
+              });
+              broadcastResults.push(...targetContacts.map(c => ({ ...c, targetCompany: 'acquired', companyName: targetName })));
+            }
+
+          } else if (signal.type === 'Job Change') {
+            // ── Job Change: job-changer = fixed Contact #1 ────────────────────
+            const domain = extractDomain(signal.company?.website);
+            const jobChangerEmail = signal.person?.email || signal._puppeteer_email || null;
+            const fixedContact = signal.person?.first_name ? {
+              name:              `${signal.person.first_name || ''} ${signal.person.last_name || ''}`.trim(),
+              email:             jobChangerEmail,
+              title:             signal.person.title       || '',
+              linkedinUrl:       signal.person.linkedin_url || signal.source_url || null,
+              emailSource:       signal.source             || 'PDL',
+              emailVerification: signal.emailVerification  || (jobChangerEmail ? { valid: true, reason: 'fixed_contact' } : null)
+            } : null;
+
+            if (domain) {
+              broadcastResults = await findBroadcastContacts({
+                domain,
+                companyName:    signal.company.name,
+                companyWebsite: signal.company.website,
+                signalType:     signal.type,
+                fixedContact
+              });
+            } else if (fixedContact) {
+              // No domain — just the job-changer, no broadcast search possible
+              const nameParts = fixedContact.name.split(' ');
+              broadcastResults = [{
+                first_name:        nameParts[0]  || '',
+                last_name:         nameParts.slice(1).join(' ') || '',
+                name:              fixedContact.name,
+                firstName:         nameParts[0]  || '',
+                lastName:          nameParts.slice(1).join(' ') || '',
+                title:             fixedContact.title,
+                email:             fixedContact.email,
+                email_flagged:     undefined,
+                emailVerification: fixedContact.emailVerification,
+                linkedin_url:      fixedContact.linkedinUrl,
+                linkedinUrl:       fixedContact.linkedinUrl,
+                source:            fixedContact.emailSource,
+                emailSource:       fixedContact.emailSource,
+                send_day:          getSendDay(fixedContact.title),
+                isFixed:           true
+              }];
+            }
+
           } else {
-            // News/Press, Rebrand, Website Visitor — up to 4 exec contacts.
-            // Exclude the single contact the primary pass already found.
+            // ── All others: News/Press, Rebrand, Website Visitor ──────────────
+            const domain = extractDomain(signal.company?.website);
             const excludeEmail = signal.person?.email || signal._puppeteer_email || null;
-            signal.broadcast_contacts = await runBroadcastContacts(domain, signal.company.name, 4, excludeEmail);
+            const fixedContact = (excludeEmail && signal.person?.first_name) ? {
+              name:              `${signal.person.first_name || ''} ${signal.person.last_name || ''}`.trim(),
+              email:             excludeEmail,
+              title:             signal.person.title        || '',
+              linkedinUrl:       signal.person.linkedin_url || null,
+              emailSource:       'apollo',
+              emailVerification: signal.emailVerification   || { valid: true, reason: 'fixed_contact' }
+            } : null;
+
+            if (domain) {
+              broadcastResults = await findBroadcastContacts({
+                domain,
+                companyName:    signal.company.name,
+                companyWebsite: signal.company.website,
+                signalType:     signal.type,
+                fixedContact
+              });
+            }
           }
+
+          // Contact Needed — broadcast ran but found no one
+          if (broadcastResults.length === 0) {
+            console.log(`  [Broadcast/${signal.type}] No contacts found for ${signal.company.name} — marking Contact Needed`);
+            signal.broadcast_contacts = [];  // empty → expandToRecords saves one Contact Needed record
+          } else {
+            signal.broadcast_contacts = broadcastResults;
+
+            // TODO (D5 / Supabase sync): persist broadcast_contacts to Supabase so the dashboard
+            // can display all contacts per signal. Blocked on Airtable→Supabase sync being built.
+            // When signal.supabase_id is available, uncomment and adapt the block below:
+            //
+            // const broadcastContactsForSupabase = broadcastResults
+            //   .filter(c => !c.contactNeeded)
+            //   .map(c => ({
+            //     name:           c.name || '',
+            //     firstName:      c.firstName || '',
+            //     lastName:       c.lastName || '',
+            //     title:          c.title || '',
+            //     email:          c.email || '',
+            //     linkedin_url:   c.linkedinUrl || c.linkedin_url || null,
+            //     send_day:       c.send_day || 1,
+            //     email_source:   c.emailSource || 'Apollo',
+            //     email_verified: c.emailVerification?.valid === true,
+            //     email_flagged:  c.emailVerification?.flagged === true,
+            //     is_fixed:       c.isFixed === true,
+            //   }));
+            //
+            // if (signal.supabase_id && broadcastContactsForSupabase.length > 0) {
+            //   try {
+            //     const { createClient } = await import('@supabase/supabase-js');
+            //     const supabaseAdmin = createClient(
+            //       process.env.SUPABASE_URL,
+            //       process.env.SUPABASE_SERVICE_ROLE_KEY
+            //     );
+            //     await supabaseAdmin
+            //       .from('signals')
+            //       .update({ broadcast_contacts: broadcastContactsForSupabase })
+            //       .eq('id', signal.supabase_id);
+            //     console.log(`  [Broadcast] Saved ${broadcastContactsForSupabase.length} broadcast contacts to Supabase for ${signal.supabase_id}`);
+            //   } catch (supabaseErr) {
+            //     console.log(`  [Broadcast] Could not save broadcast_contacts to Supabase: ${supabaseErr.message}`);
+            //   }
+            // }
+          }
+
         } catch (err) {
           signal.broadcast_contacts = [];
           console.error(`  [Broadcast] Error for ${signal.company?.name}: ${err.message}`);
@@ -3200,8 +3552,8 @@ async function saveToAirtable(deduplicatedSignals) {
     ? deduplicatedSignals.filter(s => s.source === 'AudienceLab')
     : [];
 
-  const mainRecords = expandToRecords(mainSignals);
-  const alRecords   = expandToRecords(audienceLabSignals);
+  const mainRecords = await expandToRecords(mainSignals);
+  const alRecords   = await expandToRecords(audienceLabSignals);
 
   console.log(`[Airtable] Formatted ${mainRecords.length} records for main base${useAlBase ? `, ${alRecords.length} for AudienceLab base` : ''}`);
 
@@ -3209,7 +3561,10 @@ async function saveToAirtable(deduplicatedSignals) {
   const failedRecords = [];
 
   // ── Shared batch insert helper ─────────────────────────────────────────────
+  // Returns array of created Airtable record objects (with .id and .fields).
+  // Used by Step 4.7 to build the email → record ID lookup for Claude email backfill.
   async function insertBatches(records, label, insertFn) {
+    const allCreated = [];
     const batches = chunkArray(records, 10);
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
@@ -3217,6 +3572,7 @@ async function saveToAirtable(deduplicatedSignals) {
         console.log(`[${label}] Inserting batch ${i + 1}/${batches.length} (${batch.length} records)...`);
         const result = await insertFn(batch);
         totalInserted += result.length;
+        allCreated.push(...result);
         console.log(`[${label}] Batch ${i + 1} done (${result.length} records)`);
         if (i < batches.length - 1) await new Promise(r => setTimeout(r, 1000));
       } catch (error) {
@@ -3233,6 +3589,7 @@ async function saveToAirtable(deduplicatedSignals) {
           try {
             const result = await insertFn(batch);
             totalInserted += result.length;
+            allCreated.push(...result);
             console.log(`[${label}] Batch ${i + 1} succeeded on retry (${result.length} records)`);
             if (i < batches.length - 1) await new Promise(r => setTimeout(r, 1000));
             continue;
@@ -3260,6 +3617,7 @@ async function saveToAirtable(deduplicatedSignals) {
           try {
             const result = await insertFn([record]);
             totalInserted += result.length;
+            allCreated.push(...result);
           } catch (singleErr) {
             console.error(`[${label}] Single record failed (${record.fields?.['Company Name'] || '?'}):`, singleErr.message);
             failedRecords.push(record);
@@ -3268,11 +3626,23 @@ async function saveToAirtable(deduplicatedSignals) {
         }
       }
     }
+    return allCreated;
   }
 
-  // Step 4.4: Insert main signals into main base
-  if (mainRecords.length > 0) {
-    await insertBatches(mainRecords, 'Airtable', batch => airtableClient.createRecords(batch));
+  // Step 4.4: Insert main signals into main base.
+  // Capture returned records so we can build the email → Airtable ID map for Step 4.7.
+  const createdMainRecords = mainRecords.length > 0
+    ? await insertBatches(mainRecords, 'Airtable', batch => airtableClient.createRecords(batch))
+    : [];
+
+  // Build email → Airtable record ID map.
+  // Contact Info field format: "Name: Jane Smith\nTitle: VP\nEmail: jane@example.com"
+  // Used in Step 4.7 to pass the record ID to pushSignalToHubSpot for Airtable backfill.
+  const emailToAirtableId = {};
+  for (const record of createdMainRecords) {
+    const contactInfo = record.fields?.['Contact Info'] || '';
+    const emailMatch  = contactInfo.match(/Email:\s*([^\s\n\[]+)/);
+    if (emailMatch) emailToAirtableId[emailMatch[1].toLowerCase()] = record.id;
   }
 
   // Step 4.4b: Insert AudienceLab signals into separate base (if configured)
@@ -3321,17 +3691,25 @@ Status:            ${status}
   if (AUTO_PUSH_TO_HUBSPOT) {
     console.log('\n[HubSpot Auto-Push] Auto-push enabled — pushing signals to HubSpot CRM...');
     for (const signal of deduplicatedSignals) {
+      if (signal.bespoke === true) {
+        console.log(`[HubSpot Auto-Push] ⏭ Skipping bespoke signal: ${signal.company?.name || '?'}`);
+        continue;
+      }
       // Extract per-contact objects from the signal based on type.
       // pushSignalToHubSpot takes (signal, contact) — one call per contact.
       const contacts = extractHubSpotContacts(signal);
       for (const contact of contacts) {
-        if (!contact.email) continue;
+        if (!isContactComplete(signal, contact)) {
+          console.log(`[HubSpot Auto-Push] ⏭ Skipping incomplete contact ${contact.email || '(no email)'} for ${signal.company?.name || '?'}`);
+          continue;
+        }
         try {
-          const pushResult = await pushSignalToHubSpot(signal, contact);
+          const airtableRecordId = emailToAirtableId[contact.email.toLowerCase()] || null;
+          const pushResult = await pushSignalToHubSpot(signal, contact, airtableRecordId);
           if (pushResult.success) {
-            console.log(`[HubSpot Auto-Push] ✓ ${signal.company?.name || '?'} pushed successfully`);
+            console.log(`[HubSpot Auto-Push] ✓ ${signal.company?.name || '?'} / ${contact.email} pushed successfully`);
           } else {
-            console.log(`[HubSpot Auto-Push] ✗ Push failed for ${signal.company?.name || '?'}: ${pushResult.error || pushResult.reason}`);
+            console.log(`[HubSpot Auto-Push] ✗ Push failed for ${signal.company?.name || '?'} / ${contact.email}: ${pushResult.error || pushResult.reason}`);
           }
         } catch (err) {
           // Non-fatal — pipeline continues regardless
@@ -3351,4 +3729,4 @@ export default saveToAirtable;
 // isTitleApproved / isTitleCSuite: apply the same title filter that the live pipeline uses.
 // isEmailDomainValid: apply the same domain-mismatch check.
 // apolloFindExec: 4-pass has_email + POST /people/match contact search.
-export { isTitleApproved, isTitleCSuite, isEmailDomainValid, isCorporateEmployee, apolloBroadcastSearch, apolloFindExec };
+export { isTitleApproved, isTitleCSuite, isEmailDomainValid, isCorporateEmployee, isEmploymentStatusRejected, isMLMDistributor, isNameComplete, REJECTED_TITLE_WORDS, apolloBroadcastSearch, apolloFindExec, extractLinkedInFromContactInfo };

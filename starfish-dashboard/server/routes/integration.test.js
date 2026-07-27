@@ -1,6 +1,6 @@
 // Integration tests — fire real HTTP requests at the Express app.
 // Airtable is mocked via mock.module() so tests run offline and never touch live data.
-// Run: node --test routes/integration.test.js
+// Run: node --experimental-test-module-mocks --test server/routes/integration.test.js
 
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 // ── Fake signal data ──────────────────────────────────────────────────────────
 
 const FAKE_SIGNAL = {
-  id: 'recABC123',
+  id: 'recABC1234567890',
   company_name: 'Acme Corp',
   signal_type: 'Job Change',
   signal_details: 'New CMO hired',
@@ -30,7 +30,7 @@ const FAKE_SIGNAL = {
 
 const FAKE_BSI_SIGNAL = {
   ...FAKE_SIGNAL,
-  id: 'recBSI999',
+  id: 'recBSI9999999999',
   signal_type: 'Brand Strategy Intent',
   hubspot_pushed: false,
   bsi_contacts: [
@@ -40,22 +40,22 @@ const FAKE_BSI_SIGNAL = {
 
 const FAKE_PUSHED_SIGNAL = {
   ...FAKE_SIGNAL,
-  id: 'recPUSHED1',
+  id: 'recPUSHED123456',
   hubspot_pushed: true,
 }
 
 const FAKE_NO_EMAIL_SIGNAL = {
   ...FAKE_SIGNAL,
-  id: 'recNOEMAIL',
+  id: 'recNOEMAIL123456',
   contact_info: 'John Doe\nCEO\nNo email here',
 }
 
 // Signal store — tests can look up signals by id
 const signalStore = {
-  recABC123:  FAKE_SIGNAL,
-  recBSI999:  FAKE_BSI_SIGNAL,
-  recPUSHED1: FAKE_PUSHED_SIGNAL,
-  recNOEMAIL: FAKE_NO_EMAIL_SIGNAL,
+  recABC1234567890: FAKE_SIGNAL,
+  recBSI9999999999: FAKE_BSI_SIGNAL,
+  recPUSHED123456:  FAKE_PUSHED_SIGNAL,
+  recNOEMAIL123456: FAKE_NO_EMAIL_SIGNAL,
 }
 
 // ── Mock lib/airtable.js before importing app ─────────────────────────────────
@@ -63,8 +63,8 @@ const signalStore = {
 
 mock.module('../lib/airtable.js', {
   namedExports: {
-    getAllSignals: async () => [FAKE_SIGNAL],
-    getSignalById: async (id) => {
+    getAllSignals:         async () => [FAKE_SIGNAL],
+    getSignalById:        async (id) => {
       const sig = signalStore[id]
       if (!sig) {
         const err = new Error(`Record not found: ${id}`)
@@ -73,9 +73,13 @@ mock.module('../lib/airtable.js', {
       }
       return { ...sig }
     },
-    updateSignalStatus: async () => {},
-    updateHubspotPushed: async () => {},
-    warmSignalsCache: () => {},
+    updateSignalStatus:   async () => {},
+    updateHubspotPushed:  async () => {},
+    updateContactInfo:    async () => {},
+    updateAcquiredCompany: async () => {},
+    updateSignalField:    async () => {},
+    createSignal:         async () => ({ id: 'recMOCK12345678' }),
+    warmSignalsCache:     () => {},
   },
 })
 
@@ -148,9 +152,9 @@ describe('GET /api/signals', () => {
 
 describe('GET /api/signals/:id', () => {
   it('returns 200 and the signal for a known id', async () => {
-    const res = await request.get('/api/signals/recABC123')
+    const res = await request.get('/api/signals/recABC1234567890')
     assert.equal(res.status, 200)
-    assert.equal(res.body.signal.id, 'recABC123')
+    assert.equal(res.body.signal.id, 'recABC1234567890')
     assert.equal(res.body.signal.company_name, 'Acme Corp')
   })
 
@@ -161,7 +165,7 @@ describe('GET /api/signals/:id', () => {
   })
 
   it('returned signal includes all expected fields', async () => {
-    const res = await request.get('/api/signals/recABC123')
+    const res = await request.get('/api/signals/recABC1234567890')
     const s = res.body.signal
     ;['id','company_name','signal_type','priority','status','hubspot_pushed','bsi_contacts'].forEach(field => {
       assert.ok(field in s, `Missing field: ${field}`)
@@ -174,7 +178,7 @@ describe('GET /api/signals/:id', () => {
 describe('PATCH /api/signals/:id/status', () => {
   it('returns 200 for a valid status update', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .set(CSRF)
       .send({ status: 'In Progress' })
     assert.equal(res.status, 200)
@@ -185,7 +189,7 @@ describe('PATCH /api/signals/:id/status', () => {
     const VALID = ['New', 'In Progress', 'Contacted', 'Won', 'Not a Fit']
     for (const status of VALID) {
       const res = await request
-        .patch('/api/signals/recABC123/status')
+        .patch('/api/signals/recABC1234567890/status')
         .set(CSRF)
         .send({ status })
       assert.equal(res.status, 200, `Status "${status}" should be accepted`)
@@ -194,7 +198,7 @@ describe('PATCH /api/signals/:id/status', () => {
 
   it('returns 400 for an invalid status', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .set(CSRF)
       .send({ status: 'Pending' })
     assert.equal(res.status, 400)
@@ -203,7 +207,7 @@ describe('PATCH /api/signals/:id/status', () => {
 
   it('returns 400 for an empty status', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .set(CSRF)
       .send({ status: '' })
     assert.equal(res.status, 400)
@@ -211,7 +215,7 @@ describe('PATCH /api/signals/:id/status', () => {
 
   it('returns 400 for injection attempt in status', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .set(CSRF)
       .send({ status: "'; DROP TABLE signals;--" })
     assert.equal(res.status, 400)
@@ -219,7 +223,7 @@ describe('PATCH /api/signals/:id/status', () => {
 
   it('returns 403 when CSRF header is missing', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .send({ status: 'New' })
     assert.equal(res.status, 403)
   })
@@ -230,7 +234,7 @@ describe('PATCH /api/signals/:id/status', () => {
 describe('POST /api/signals/:id/push-to-hubspot', () => {
   it('returns 403 when CSRF header is missing', async () => {
     const res = await request
-      .post('/api/signals/recABC123/push-to-hubspot')
+      .post('/api/signals/recABC1234567890/push-to-hubspot')
       .send({})
     assert.equal(res.status, 403)
   })
@@ -243,33 +247,34 @@ describe('POST /api/signals/:id/push-to-hubspot', () => {
     assert.equal(res.status, 404)
   })
 
-  it('returns 409 when signal is already pushed', async () => {
+  it('returns 200 with alreadyPushed flag when signal is already pushed', async () => {
     const res = await request
-      .post('/api/signals/recPUSHED1/push-to-hubspot')
+      .post('/api/signals/recPUSHED123456/push-to-hubspot')
       .set(CSRF)
       .send({})
-    assert.equal(res.status, 409)
+    assert.equal(res.status, 200)
+    assert.equal(res.body.alreadyPushed, true)
   })
 
   it('returns 422 when contact_info has no email', async () => {
     const res = await request
-      .post('/api/signals/recNOEMAIL/push-to-hubspot')
+      .post('/api/signals/recNOEMAIL123456/push-to-hubspot')
       .set(CSRF)
       .send({})
     assert.equal(res.status, 422)
     assert.ok(res.body.error.includes('email'))
   })
 
-  it('returns 500 when HUBSPOT_TOKEN is not configured', async () => {
-    const original = process.env.HUBSPOT_TOKEN
-    delete process.env.HUBSPOT_TOKEN
+  it('returns 422 when HUBSPOT_PRIVATE_APP_TOKEN is not configured', async () => {
+    const original = process.env.HUBSPOT_PRIVATE_APP_TOKEN
+    delete process.env.HUBSPOT_PRIVATE_APP_TOKEN
     const res = await request
-      .post('/api/signals/recABC123/push-to-hubspot')
+      .post('/api/signals/recABC1234567890/push-to-hubspot')
       .set(CSRF)
       .send({})
-    assert.equal(res.status, 500)
-    assert.ok(res.body.error.includes('HUBSPOT_TOKEN'))
-    process.env.HUBSPOT_TOKEN = original
+    assert.equal(res.status, 422)
+    assert.ok(res.body.missingFields.includes('HUBSPOT_PRIVATE_APP_TOKEN'))
+    process.env.HUBSPOT_PRIVATE_APP_TOKEN = original
   })
 })
 
@@ -283,14 +288,14 @@ describe('CSRF middleware', () => {
 
   it('blocks POST without X-Requested-With header', async () => {
     const res = await request
-      .post('/api/signals/recABC123/push-to-hubspot')
+      .post('/api/signals/recABC1234567890/push-to-hubspot')
       .send({})
     assert.equal(res.status, 403)
   })
 
   it('blocks PATCH without X-Requested-With header', async () => {
     const res = await request
-      .patch('/api/signals/recABC123/status')
+      .patch('/api/signals/recABC1234567890/status')
       .send({ status: 'New' })
     assert.equal(res.status, 403)
   })
@@ -298,7 +303,7 @@ describe('CSRF middleware', () => {
   it('allows POST with correct X-Requested-With header', async () => {
     // Will 422 (no email) but NOT 403 — proving CSRF check passed
     const res = await request
-      .post('/api/signals/recNOEMAIL/push-to-hubspot')
+      .post('/api/signals/recNOEMAIL123456/push-to-hubspot')
       .set(CSRF)
       .send({})
     assert.notEqual(res.status, 403)

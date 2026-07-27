@@ -4,7 +4,7 @@ import axios from 'axios';
 import { fileURLToPath as toPath } from 'url';
 import { dirname as dirOf, resolve } from 'path';
 
-import { enrichSignal, inferIndustry } from './utils/claude_client.js';
+import { enrichSignal, inferIndustry, classifyMaSignal } from './utils/claude_client.js';
 import { getTodayStamp } from './utils/date_helpers.js';
 import { formatRevenue, formatNumber, isGarbageName, sanitizeApiInput } from './utils/text_parsing.js';
 import { sendErrorAlert } from './utils/telegram_client.js';
@@ -78,6 +78,132 @@ function isJobChangeArticle(signal) {
   ];
 
   return JOB_CHANGE_KEYWORDS.some(kw => text.includes(kw));
+}
+
+// ── Step 2.10: Reclassify News/Press signals (A2 Rebrand + A3 Funding + A4 Job Change) ──
+// Runs AFTER Claude enrichment. Order matters:
+//   A2 (rebrand) first — a genuine rebrand article rarely also has funding language
+//   A3 (funding) before A4 (job change) — "New CFO joins after $50M raise" → Funding not Job Change
+// Only mutates signal.type — never discards or duplicates the signal.
+
+// A2: Rebrand reclassification keywords — mirrors workflow_1 MediaStack queries
+// and backfill_rebrand_signals.js so all three sources stay in sync.
+const REBRAND_KEYWORDS = [
+  'rebrand', 'rebranding', 'rebranded',
+  'brand refresh', 'brand launch', 'brand identity',
+  'brand repositioning', 'new brand', 'new logo',
+  'new name', 'renamed to', 'name change',
+  'identity refresh', 'visual identity',
+  'brand overhaul', 'brand transformation', 'brand redesign',
+];
+
+const FUNDING_KEYWORDS = [
+  // Named rounds — most reliable signal
+  'series a', 'series b', 'series c', 'series d', 'series e', 'series f',
+  'seed round', 'pre-seed', 'seed funding',
+  // Dollar-amount raises — common headline formats
+  'raises $', 'raised $',
+  'secures $', 'secured $',
+  'closes $', 'closed $',
+  'announces $', 'announced $',
+  'receives $', 'received $',
+  'completes $', 'completed $',
+  // Funding language without dollar sign
+  'new funding', 'secures funding', 'secured funding',
+  'closes funding', 'closed funding', 'announce funding',
+  'funding round', 'investment round',
+  'capital raise', 'raises capital',
+  'in new capital', 'new capital',
+  'angel investment', 'angel round',
+  'oversubscribed round',
+  'growth equity', 'growth capital',
+  'venture capital', 'vc-backed',
+  'receives financing', 'strategic investment',
+  'total funding', 'post-money',
+  // Removed: 'backed by', 'led by' — too broad, match non-funding articles constantly
+];
+
+const APPOINTMENT_KEYWORDS = [
+  'appoints', 'appointed', 'names', 'named',
+  'hires', 'hired', 'joins as',
+  'promoted to', 'promotion to',
+  'named as', 'appointed as',
+  'announces appointment',
+  'welcomes', 'succeeds',
+  'takes over as', 'steps into the role',
+  'steps into role',
+  'new cmo', 'new vp of marketing', 'new vp marketing',
+  'new chief marketing officer', 'new chief brand officer',
+  'new head of marketing', 'new director of marketing',
+  'new vice president'
+];
+
+// Appointment must involve a marketing/brand/comms ROLE to qualify as Job Change.
+// Bare words like 'marketing' or 'brand' are too common in article body text
+// (e.g. "no marketing mention") — only compound role phrases are safe to match.
+const APPOINTMENT_TITLE_KEYWORDS = [
+  // CMO / C-suite brand & comms
+  'cmo', 'chief marketing', 'chief brand', 'chief communications',
+  // VP-level
+  'vp of marketing', 'vp marketing', 'vp brand', 'vp of brand',
+  'vp communications', 'vp of communications',
+  'vice president marketing', 'vice president brand',
+  'vice president of marketing', 'vice president of brand',
+  // SVP / EVP
+  'svp marketing', 'svp brand', 'evp marketing', 'evp brand',
+  // Head-of
+  'head of marketing', 'head of brand',
+  'head of communications', 'head of comms',
+  // Director
+  'director of marketing', 'marketing director',
+  'director of brand', 'brand director',
+  'director of communications', 'communications director',
+];
+
+function reclassifyNewsPressSignals(signals) {
+  let rebrandCount   = 0;
+  let fundingCount   = 0;
+  let jobChangeCount = 0;
+
+  for (const signal of signals) {
+    if (signal.type !== 'News/Press') continue;
+
+    const fullText = [
+      signal.article?.title       || '',
+      signal.article?.description || '',
+      signal.brief                || '',
+    ].join(' ').toLowerCase();
+
+    // A2: rebrand keywords — runs first, genuine rebrands rarely contain funding language
+    if (REBRAND_KEYWORDS.some(kw => fullText.includes(kw))) {
+      console.log(`[Reclassify] News/Press → Rebrand: "${signal.company?.name}"`);
+      signal.type = 'Rebrand';
+      rebrandCount++;
+      continue;
+    }
+
+    // A3: funding keywords take priority over appointment language
+    if (FUNDING_KEYWORDS.some(kw => fullText.includes(kw))) {
+      console.log(`[Reclassify] News/Press → Funding: "${signal.company?.name}"`);
+      signal.type = 'Funding';
+      fundingCount++;
+      continue;
+    }
+
+    // A4: only reclassify if both appointment language AND a marketing title are present
+    if (!APPOINTMENT_KEYWORDS.some(kw => fullText.includes(kw))) continue;
+    if (!APPOINTMENT_TITLE_KEYWORDS.some(kw => fullText.includes(kw))) {
+      console.log(`[Reclassify] Appointment detected but no marketing title — keeping News/Press: "${signal.company?.name}"`);
+      continue;
+    }
+
+    console.log(`[Reclassify] News/Press → Job Change: "${signal.company?.name}"`);
+    signal.type = 'Job Change';
+    jobChangeCount++;
+  }
+
+  console.log(`[Reclassify] Complete — Rebrand: ${rebrandCount}, Funding: ${fundingCount}, Job Change: ${jobChangeCount}`);
+  return signals;
 }
 
 // ── Apollo enrichment for M&A companies (acquirer or seller) ─────────────────
@@ -429,6 +555,22 @@ function isUSCompany(signal) {
     return false;
   }
 
+  // Check 4: Geographic qualifiers embedded in company name.
+  // Catches "GroupM MENA", "Scandinavian Tobacco Group", "Nordic Capital" etc.
+  // Only patterns that are unambiguously non-US — avoids false positives.
+  const NON_US_NAME_PATTERNS = [
+    /\bscandinavian\b/i,   // Scandinavian Tobacco Group, Scandinavian Airlines
+    /\bnordic\b/i,         // Nordic Capital, Nordic Entertainment Group
+    /\bmena\b/i,           // GroupM MENA, Publicis MENA — Middle East/North Africa
+    /\bemea\b/i,           // "Company EMEA" — only valid as company name, not as title modifier
+    /\bapac\b/i,           // "Company APAC"
+  ];
+  const companyNameForGeo = (signal.company?.name || '').trim();
+  if (companyNameForGeo && NON_US_NAME_PATTERNS.some(p => p.test(companyNameForGeo))) {
+    console.log(`  [Filter/US] ❌ ${companyNameForGeo} — non-US geographic qualifier in company name`);
+    return false;
+  }
+
   return true;
 }
 
@@ -716,6 +858,14 @@ function buildPromptVars(signal) {
     signalDetails = `${signal.company.name} is rebranding` +
       (signal.rebrand?.new_name ? ` to ${signal.rebrand.new_name}` : '') +
       (signal.rebrand?.summary ? `. ${signal.rebrand.summary}` : '');
+  } else if (signal.type === 'Funding') {
+    // PredictLeads receives_financing signals arrive as Funding type from workflow_1.
+    // MediaStack/NewsAPI Funding signals were News/Press here and are reclassified later at Step 2.10.
+    signalDetails = (signal.article?.title || signal.rebrand?.summary || '') +
+      (signal.article?.description ? '. ' + signal.article.description : '');
+    if (!signalDetails.trim()) {
+      signalDetails = `${signal.company.name} received financing / funding round.`;
+    }
   }
 
   // For Job Change signals the person is already known; for News/Press the contact
@@ -998,6 +1148,8 @@ async function filterSignals(allSignals) {
       signal.priority = enrichment.priority;
       signal.brief = enrichment.brief;
       signal.contact_approach = enrichment.contact_approach;
+      signal.bespoke = enrichment.bespoke;
+      signal.bespoke_reason = enrichment.bespoke_reason;
       // Rebrand priority is now fully decided by Claude based on past vs future tense —
       // no override here. Claude's system prompt contains the tense-based scoring rule.
 
@@ -1008,6 +1160,8 @@ async function filterSignals(allSignals) {
       signal.priority = 'MEDIUM';
       signal.brief = 'Signal requires manual review.';
       signal.contact_approach = 'Review company website and LinkedIn before outreach.';
+      signal.bespoke = false;
+      signal.bespoke_reason = '';
       signal._claude_failed = true;  // flag so workflow_4 can mark these distinctly in Airtable
 
       return { signal, failure: { company: signal.company.name, error: error.message } };
@@ -1035,7 +1189,56 @@ async function filterSignals(allSignals) {
 
   console.log(`[Claude] Enriched ${enrichedSignals.length} signals`);
 
-  // Step 2.10: Save
+  // Step 2.10: Reclassify News/Press → Funding (A3) and News/Press → Job Change (A4)
+  // Must run after Claude enrichment so signal.brief is available for keyword scanning.
+  // A3 runs before A4 inside reclassifyNewsPressSignals() — see function definition above.
+  reclassifyNewsPressSignals(enrichedSignals);
+
+  // Step 2.10b: Claude-based M&A reclassification for remaining News/Press signals
+  // from MediaStack, NewsAPI, and PredictLeads — runs after A3/A4 keyword pass so
+  // only truly ambiguous articles reach Claude. Only high/medium confidence results
+  // are applied to avoid false positives.
+  const MA_SOURCES = new Set(['MediaStack', 'NewsAPI', 'PredictLeads']);
+  const maCheckCandidates = enrichedSignals.filter(
+    s => s.type === 'News/Press' && MA_SOURCES.has(s.source)
+  );
+
+  if (maCheckCandidates.length > 0) {
+    console.log(`[Reclassify/M&A] Checking ${maCheckCandidates.length} News/Press signal(s) from MediaStack/NewsAPI/PredictLeads...`);
+    let maReclassified = 0;
+
+    await runBatched(maCheckCandidates, CLAUDE_CONCURRENCY, async (signal) => {
+      const company = signal.company?.name || '';
+      const details = signal.article?.title
+        ? `${signal.article.title}. ${signal.article?.description || ''}`
+        : (signal.signal_details || '');
+      const brief   = signal.brief || '';
+
+      const result = await classifyMaSignal(company, details, brief);
+
+      if (result.is_ma && result.confidence !== 'low') {
+        console.log(`[Reclassify/M&A] ✓ News/Press → M&A Activity [${result.confidence}]: "${company}"` +
+          (result.acquired_company ? ` — acquired: ${result.acquired_company}` : ''));
+        signal.type = 'M&A Activity';
+        if (result.acquired_company) signal.acquired_company = result.acquired_company;
+        // Build a minimal deal object so display code doesn't show "(M&A Activity — deal data missing)".
+        // Amount is unknown from news text — the AI brief will reference it if the article mentioned it.
+        if (!signal.deal) {
+          signal.deal = {
+            type:   'acquires',
+            seller: result.acquired_company || null,
+            amount: null
+          };
+        }
+        maReclassified++;
+      }
+      return { signal, keep: true };
+    });
+
+    console.log(`[Reclassify/M&A] Complete — ${maReclassified} signal(s) reclassified as M&A Activity`);
+  }
+
+  // Step 2.11: Save
   fs.writeFileSync(`${TMP_DIR}/filtered_signals_${today}.json`, JSON.stringify(enrichedSignals, null, 2));
   console.log(`[Filter Complete] ${enrichedSignals.length} signals ready for deduplication`);
 
