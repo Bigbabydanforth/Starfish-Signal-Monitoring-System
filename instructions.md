@@ -1,5 +1,12 @@
 # Agent Operating Guide
 
+> **STATUS: FULLY BUILT AND DEPLOYED (2026-07-28)**
+> All phases complete. System is live. Do not treat this as a planning doc — the system is built.
+> For current state, read the Claude project memory files first (MEMORY.md index).
+> Key changes from original spec: HubSpot enrollment is handled by HubSpot-native workflow (not code).
+> AUTO_ENROLL_TO_SEQUENCE stays false permanently. Cron is Mon/Wed/Thu (not daily).
+> Andrew Bell + Cole Straughn added (replaced Carly). Dashboard on Vercel, API + pipeline on Railway.
+
 These instructions help turn human prompts into reliable, repeatable systems.
 
 AI can guess.  

@@ -139,12 +139,22 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
   let failed  = 0;
   let skipped = 0;
 
-  // Fetch all records where HubSpot Pushed is false (or blank)
+  // Only push signals from the last 7 days — prevents mass-pushing thousands of old records.
+  // Monday pipeline runs → Tuesday 6AM cron pushes Monday's signals (within the 7-day window).
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - 7);
+  const cutoffStr = cutoffDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  const filterFormula = `AND(
+    OR({HubSpot Pushed}=FALSE(), {HubSpot Pushed}=BLANK()),
+    IS_AFTER({Date Detected}, '${cutoffStr}')
+  )`;
+
   let records;
   try {
     records = await getBase()(TABLE)
       .select({
-        filterByFormula: `OR({HubSpot Pushed}=FALSE(), {HubSpot Pushed}=BLANK())`,
+        filterByFormula: filterFormula,
         sort: [{ field: 'Date Detected', direction: 'asc' }],
       })
       .all();
@@ -154,7 +164,7 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
     return { pushed: 0, failed: 0, skipped: 0, dryRun };
   }
 
-  console.log(`[HubSpot Push] Found ${records.length} unpushed record(s)`);
+  console.log(`[HubSpot Push] Found ${records.length} unpushed record(s) from last 7 days (cutoff: ${cutoffStr})`);
 
   for (const record of records) {
     const signal  = mapRecord(record);
