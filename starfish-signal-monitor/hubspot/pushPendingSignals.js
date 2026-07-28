@@ -194,7 +194,6 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
       skipped++;
       continue;
     }
-    }
 
     const contact = {
       name:         parsed.name       || '',
