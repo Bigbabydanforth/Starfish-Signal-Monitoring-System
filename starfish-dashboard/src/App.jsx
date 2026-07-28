@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Home from './pages/Home'
 import Login from './pages/Login'
+import ResetPassword from './pages/ResetPassword'
 import SignalsTable from './pages/SignalsTable'
 import SignalDetail from './pages/SignalDetail'
 import AddContact from './pages/AddContact'
@@ -14,8 +15,9 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         {/* Public — no sidebar */}
-        <Route path="/"      element={<Home />} />
-        <Route path="/login" element={<Login />} />
+        <Route path="/"               element={<Home />} />
+        <Route path="/login"          element={<Login />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
 
         {/* Authenticated — wrapped in sidebar Layout */}
         <Route
