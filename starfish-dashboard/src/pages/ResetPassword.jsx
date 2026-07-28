@@ -31,20 +31,29 @@ export default function ResetPassword() {
   const [error, setError]               = useState('')
   const [done, setDone]                 = useState(false)
   const [validSession, setValidSession] = useState(false)
+  const [checking, setChecking]         = useState(true)
 
   // Supabase puts the recovery token in the URL hash — exchange it for a session
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) setValidSession(true)
+      setChecking(false)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY' && session) {
         setValidSession(true)
+        setChecking(false)
       }
     })
 
-    return () => subscription.unsubscribe()
+    // Give Supabase 1.5s to fire the PASSWORD_RECOVERY event before showing invalid
+    const timeout = setTimeout(() => setChecking(false), 1500)
+
+    return () => {
+      subscription.unsubscribe()
+      clearTimeout(timeout)
+    }
   }, [])
 
   async function handleSubmit(e) {
@@ -89,7 +98,9 @@ export default function ResetPassword() {
           <div style={{ fontSize: '13px', color: '#6da3ab', marginTop: '2px', fontFamily: 'Inter, sans-serif' }}>Signal Dashboard</div>
         </div>
 
-        {done ? (
+        {checking ? (
+          <div style={{ textAlign: 'center', padding: '20px 0', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: '14px' }}>Verifying your link…</div>
+        ) : done ? (
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '32px', marginBottom: '12px' }}>✓</div>
             <div style={{ fontSize: '18px', fontWeight: '600', color: '#2d2d2d', marginBottom: '8px', fontFamily: 'Inter, sans-serif' }}>Password updated!</div>
