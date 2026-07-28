@@ -182,6 +182,20 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
       continue;
     }
 
+    const industry = signal.industry || signal.company?.industry || '';
+    if (!industry.trim() || industry.trim().toLowerCase() === 'unknown') {
+      console.log(`  [Push] Skipping ${signal.company_name} (${record.id}) — no industry (needed for proof clients)`);
+      skipped++;
+      continue;
+    }
+
+    if (!signal.claude_generated && signal.ab_test_group === 'claude') {
+      console.log(`  [Push] Skipping ${signal.company_name} (${record.id}) — claude group but no emails generated`);
+      skipped++;
+      continue;
+    }
+    }
+
     const contact = {
       name:         parsed.name       || '',
       first_name:   parsed.first_name || '',
