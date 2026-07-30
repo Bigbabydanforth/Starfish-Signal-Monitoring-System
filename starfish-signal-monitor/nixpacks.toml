@@ -21,7 +21,7 @@ aptPkgs = [
   "ca-certificates",
   "wget",
   "unzip",
-  "chromium-browser"
+  "chromium"
 ]
 
 [phases.install]
@@ -29,4 +29,4 @@ cmds = ["npm ci"]
 
 [variables]
 PUPPETEER_SKIP_DOWNLOAD = "true"
-PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium-browser"
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"

@@ -37,6 +37,11 @@ function resolveChromePath() {
 }
 const CHROME_PATH = resolveChromePath();
 
+// Set PUPPETEER_ENABLED=false in Railway env vars to disable Puppeteer entirely.
+// Chrome/Chromium is not reliably available on Railway — when disabled, all
+// exported functions return null immediately so the pipeline never hangs.
+const PUPPETEER_ENABLED = process.env.PUPPETEER_ENABLED !== 'false';
+
 // -- Helpers ----------------------------------------------------------------------
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -329,7 +334,12 @@ async function _acquireSlot() {
   if (free) {
     free.busy = true;
     if (!free.browser || !free.browser.connected) {
-      free.browser = await puppeteer.launch(_launchOpts);
+      // 30-second timeout on launch — if Chrome isn't installed/working it fails
+      // fast instead of hanging the pipeline indefinitely.
+      const launchTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Puppeteer launch timed out after 30s — Chrome may not be installed')), 30000)
+      );
+      free.browser = await Promise.race([puppeteer.launch(_launchOpts), launchTimeout]);
     }
     return free;
   }
@@ -678,4 +688,18 @@ async function findEmailPatternViaGoogle(domain) {
   }
 }
 
-export { findEmailWithPuppeteer, findCompanyDomain, findEmailPatternViaGoogle, validateDomainBelongsToCompany, closeBrowser };
+// When PUPPETEER_ENABLED=false, all functions return null immediately
+// without launching Chrome — prevents pipeline hangs on Railway.
+const _noop = async () => null;
+const _findEmailWithPuppeteer        = PUPPETEER_ENABLED ? findEmailWithPuppeteer        : _noop;
+const _findCompanyDomain             = PUPPETEER_ENABLED ? findCompanyDomain             : _noop;
+const _findEmailPatternViaGoogle     = PUPPETEER_ENABLED ? findEmailPatternViaGoogle     : _noop;
+const _validateDomainBelongsToCompany = PUPPETEER_ENABLED ? validateDomainBelongsToCompany : _noop;
+
+export {
+  _findEmailWithPuppeteer          as findEmailWithPuppeteer,
+  _findCompanyDomain               as findCompanyDomain,
+  _findEmailPatternViaGoogle       as findEmailPatternViaGoogle,
+  _validateDomainBelongsToCompany  as validateDomainBelongsToCompany,
+  closeBrowser,
+};
