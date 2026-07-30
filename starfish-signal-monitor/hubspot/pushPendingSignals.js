@@ -34,8 +34,14 @@ function getBase() {
 
 // Parse the Contact Info text block from Airtable into a contact object.
 // Format: "Name: Jane Smith\nTitle: CMO\nEmail: jane@example.com\nLinkedIn: ..."
+// Also handles unlabelled blocks where the first line is just the name.
 function parseContactInfo(contactInfo) {
   if (!contactInfo) return {};
+
+  // Strip a leading label prefix like "Name: ", "Title: ", "Email: " from a line.
+  function stripLabel(line) {
+    return line.replace(/^(name|title|email|linkedin|website|phone)\s*:\s*/i, '').trim();
+  }
 
   const lines = contactInfo.split('\n').map(l => l.trim()).filter(Boolean);
   let name = null, title = null, email = null, linkedin = null;
@@ -53,10 +59,10 @@ function parseContactInfo(contactInfo) {
       continue;
     }
     if (!name && !line.startsWith('⚠️') && !line.startsWith('Website:')) {
-      name = line; continue;
+      name = stripLabel(line); continue;
     }
     if (name && !title && !line.startsWith('Website:') && !line.startsWith('http') && !line.includes('@')) {
-      title = line;
+      title = stripLabel(line);
     }
   }
 
@@ -170,8 +176,8 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
     const signal  = mapRecord(record);
     const parsed  = parseContactInfo(signal.contact_info);
 
-    if (!parsed.email) {
-      console.log(`  [Push] Skipping ${signal.company_name} (${record.id}) — no email in Contact Info`);
+    if (!parsed.email || parsed.email === 'email_not_unlocked@domain.com') {
+      console.log(`  [Push] Skipping ${signal.company_name} (${record.id}) — no valid email in Contact Info`);
       skipped++;
       continue;
     }
