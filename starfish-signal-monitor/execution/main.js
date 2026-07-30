@@ -352,7 +352,7 @@ if (!process.argv.includes('--test') && !process.argv.includes('--manual')) {
   }, {
     timezone: 'America/New_York'
   });
-  console.log(`[Cron] HubSpot push scheduled: "0 6 * * 2,3,4" Tue/Wed/Thu (America/New_York)`);
+  console.log(`[Cron] HubSpot push scheduled: "0 8 * * 2,3,4" Tue/Wed/Thu (America/New_York)`);
   console.log(`[Cron] Push mode: ${process.env.AUTO_PUSH_TO_HUBSPOT === 'true' ? 'LIVE' : 'DRY-RUN (set AUTO_PUSH_TO_HUBSPOT=true to enable)'}`);
 
 } else {
