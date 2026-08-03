@@ -316,8 +316,9 @@ async function run() {
       // Industry — only fill if currently empty
       if (industry && !rf['Industry']) fields['Industry'] = industry;
 
-      // AB Test Group — only assign if not already set
-      if (!rf['AB Test Group']) {
+      // AB Test Group — only assign if contact found AND not already set
+      // No contact = no AB group yet; we assign when the contact is found
+      if (contact?.email && !rf['AB Test Group']) {
         fields['AB Test Group'] = assignAbGroup(isBespoke, signalType);
       }
 

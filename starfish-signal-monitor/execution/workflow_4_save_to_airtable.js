@@ -1465,7 +1465,7 @@ function formatSignalDetails(signal) {
 
 // Maps a stored verification result to the Airtable "Email Verified" single-select field.
 function getEmailVerifiedStatus(verification) {
-  if (!verification) return 'Unverified';
+  if (!verification) return '';
   if (verification.reason === 'apollo_verified') return 'Verified';
   if (verification.reason === 'apollo_likely')   return 'Likely';
   if (verification.flagged === true)             return 'Risky (Flagged)';
@@ -1609,9 +1609,9 @@ function formatForAirtable(signal, broadcastContact, emailData = {}) {
       'Contact Approach':      signal.contact_approach,
       'Source URL':            signal.source_url || null,
       'Status':                (signal._claude_failed || signal._enrichment_failed) ? 'Needs Review' : 'New',
-      'Email Verified':        (broadcastContact && typeof broadcastContact === 'object')
+      'Email Verified':        (broadcastContact && typeof broadcastContact === 'object' && broadcastContact.email)
                                  ? getEmailVerifiedStatus(broadcastContact.emailVerification)
-                                 : getEmailVerifiedStatus(signal.emailVerification),
+                                 : '',
       // Send Day: 1–5 stagger for broadcast contacts (BSI and non-BSI). null for legacy single-contact signals.
       'Send Day':              (broadcastContact && typeof broadcastContact === 'object') ? (broadcastContact.send_day || null) : null,
       // Bespoke flag — set by Claude enrichment. Bespoke contacts require manual outreach, not sequences.
