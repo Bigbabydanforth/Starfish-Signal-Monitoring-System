@@ -44,6 +44,7 @@ function mapRecord(record) {
     claude_generated:    record.get('Claude Generated') === true,
     claude_generated_at: record.get('Claude Generated At') || null,
     ab_test_group:       record.get('AB Test Group') || null,
+    proof_clients:       record.get('Proof Clients') || null,
     email_1_subject:     record.get('Email 1 Subject') || null,
     email_1_body:        record.get('Email 1 Body') || null,
     email_2_body:        record.get('Email 2 Body') || null,

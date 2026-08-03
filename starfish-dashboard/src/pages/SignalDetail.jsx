@@ -886,6 +886,7 @@ export default function SignalDetail() {
                 <DataPill label="Revenue"      value={formatRevenue(signal.company_revenue)} />
                 <DataPill label="Funding"      value={signal.company_funding_stage} />
                 <DataPill label="Status"       value={signal.status} />
+                <DataPill label="AB Group"     value={signal.ab_test_group} />
               </div>
 
               {/* Dates */}
@@ -1002,7 +1003,17 @@ export default function SignalDetail() {
               )}
             </Card>
 
-            {/* 7 — Record Metadata */}
+            {/* 7 — Proof Clients */}
+            {signal.proof_clients && (
+              <Card>
+                <SectionHeading>Proof Clients</SectionHeading>
+                <TextBox accent="#6da3ab">
+                  <TextBlock text={signal.proof_clients} />
+                </TextBox>
+              </Card>
+            )}
+
+            {/* 8 — Record Metadata */}
             <Card>
               <SectionHeading>Record Metadata</SectionHeading>
               <div style={{
@@ -1017,6 +1028,11 @@ export default function SignalDetail() {
                 <MetaRow label="Status">{signal.status || '—'}</MetaRow>
                 <MetaRow label="HubSpot Pushed">{signal.hubspot_pushed ? 'Yes' : 'No'}</MetaRow>
                 {signal.send_day && <MetaRow label="Send Day">Day {signal.send_day}</MetaRow>}
+                {signal.ab_test_group && <MetaRow label="AB Test Group">{signal.ab_test_group}</MetaRow>}
+                {signal.industry && <MetaRow label="Industry">{signal.industry}</MetaRow>}
+                {signal.signal_type === 'M&A Activity' && signal.acquired_company && (
+                  <MetaRow label="Acquired Company">{signal.acquired_company}</MetaRow>
+                )}
                 <MetaRow label="Date Detected">{signal.date_detected || '—'}</MetaRow>
                 <MetaRow label="Created At">{signal.created_at || '—'}</MetaRow>
               </div>

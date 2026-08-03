@@ -64,7 +64,21 @@ const SIGNAL_SOURCE_MAP = {
   'NewsAPI':      'NewsAPI',
   'MediaStack':   'MediaStack',
   'PredictLeads': 'PredictLeads',
-  'AudienceLab':  'AudienceLab SuperPixel', // pixel segment default
+  'AudienceLab':  'AudienceLab Superpixel', // pixel segment default
+};
+
+// ── Signal type → signal_source (takes priority over source field) ────────────
+// Derives the correct source from the signal type so BSI and Website Visitor
+// are never confused (both have source='AudienceLab' but map to different enums).
+// NewsAPI is ignored per product decision — all news/funding signals → MediaStack.
+const SIGNAL_TYPE_SOURCE_MAP = {
+  'Job Change':            'PDL',
+  'M&A Activity':          'PredictLeads',
+  'News/Press':            'MediaStack',
+  'Rebrand':               'MediaStack',
+  'Funding':               'MediaStack',
+  'Website Visitor':       'AudienceLab Superpixel',
+  'Brand Strategy Intent': 'AudienceLab Intent',
 };
 
 // ── Token substitution ────────────────────────────────────────────────────────
@@ -82,10 +96,13 @@ function substituteTokens(text, { contactFirstName, contactCompany, senderFirstN
 }
 
 // ── A/B group assignment ──────────────────────────────────────────────────────
-// 25% Claude / 75% Starfish. Bespoke contacts are always Starfish.
+// Default:  25% Claude / 75% Starfish.
+// BSI:      50% Claude / 50% Starfish (higher personalisation budget for intent signals).
+// Bespoke:  always Starfish (manual outreach only — no AI emails).
 // Exported for unit testing.
-export function assignAbGroup(isBespoke) {
+export function assignAbGroup(isBespoke, signalType = '') {
   if (isBespoke) return 'starfish';
+  if (signalType === 'Brand Strategy Intent') return Math.random() < 0.5 ? 'claude' : 'starfish';
   return Math.random() < 0.25 ? 'claude' : 'starfish';
 }
 
@@ -239,7 +256,7 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
   // Otherwise assign randomly: 75% starfish / 25% claude.
   let abGroup     = (contact.abGroup === 'starfish' || contact.abGroup === 'claude')
     ? contact.abGroup
-    : assignAbGroup(signal.bespoke === true);
+    : assignAbGroup(signal.bespoke === true, signalType);
   let claudeEmails = null;
 
   // Resolve the sender route BEFORE email generation so we know the sender's
@@ -297,7 +314,7 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
     signal_data:          SIGNAL_TYPE_MAP[signalType] || signalType,
     signal_priority:      signal.priority      || 'MEDIUM',
     signal_brief:         (signal.brief        || '').slice(0, 1000),
-    signal_source:        SIGNAL_SOURCE_MAP[signal.source] || signal.source || '',
+    signal_source:        SIGNAL_TYPE_SOURCE_MAP[signalType] || SIGNAL_SOURCE_MAP[signal.source] || signal.source || '',
     signal_date:          signal.date_detected || new Date().toISOString().split('T')[0],
     send_day:             String(contact.send_day   || '1'),
     // Map PDL → Apollo — HubSpot contact_source only allows: Apollo, Hunter, Puppeteer, AudienceLab.
