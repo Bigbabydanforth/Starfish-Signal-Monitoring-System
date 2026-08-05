@@ -1046,6 +1046,8 @@ async function filterSignals(allSignals) {
 
   async function enrichMaCached(companyName, websiteUrl) {
     const key = (companyName || websiteUrl || '').toLowerCase().trim();
+    // Skip cache for empty keys — different companies with no name must not share a cached result
+    if (!key) return enrichMaCompany(companyName, websiteUrl);
     if (maCompanyCache.has(key)) {
       console.log(`  [M&A Revenue] Cache hit for "${companyName || websiteUrl}" — skipping Apollo call`);
       return maCompanyCache.get(key);
@@ -1067,6 +1069,12 @@ async function filterSignals(allSignals) {
       const sellerData = await enrichMaCached(signal.deal.seller, null);
       if (sellerData) sellerRevenue = sellerData.revenue || 0;
       signal.deal.seller_revenue = sellerRevenue;
+      // Capture acquired company industry from Apollo lookup
+      if (sellerData?.industry) signal.acquired_company_industry = sellerData.industry;
+    }
+    // Normalise acquired_company so both paths (PredictLeads + reclassified) set the same field
+    if (signal.deal?.seller && !signal.acquired_company) {
+      signal.acquired_company = signal.deal.seller;
     }
 
     const acquirerRevenue = acquirerData?.revenue || 0;
@@ -1220,7 +1228,14 @@ async function filterSignals(allSignals) {
         console.log(`[Reclassify/M&A] ✓ News/Press → M&A Activity [${result.confidence}]: "${company}"` +
           (result.acquired_company ? ` — acquired: ${result.acquired_company}` : ''));
         signal.type = 'M&A Activity';
-        if (result.acquired_company) signal.acquired_company = result.acquired_company;
+        if (result.acquired_company) {
+          signal.acquired_company = result.acquired_company;
+          // Look up the acquired company's industry via Apollo — same cache used for revenue checks
+          if (!signal.acquired_company_industry) {
+            const targetData = await enrichMaCached(result.acquired_company, null);
+            if (targetData?.industry) signal.acquired_company_industry = targetData.industry;
+          }
+        }
         // Build a minimal deal object so display code doesn't show "(M&A Activity — deal data missing)".
         // Amount is unknown from news text — the AI brief will reference it if the article mentioned it.
         if (!signal.deal) {

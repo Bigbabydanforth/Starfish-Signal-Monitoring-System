@@ -9,32 +9,6 @@ import HubSpotButton from '../components/HubSpotButton'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Pre-compute missing fields client-side so the warning shows immediately
-// without waiting for an API call. Mirrors the server-side validation in
-// pushSignalToHubSpot.js so users see problems before clicking push.
-function computeMissingFields(signal) {
-  if (!signal) return []
-  const missing = []
-
-  if (!signal.contact_info || !signal.contact_info.includes('@')) {
-    missing.push('Email address not found in contact info')
-  }
-  if (!signal.company_name) {
-    missing.push('Company name is missing')
-  }
-  if (!signal.industry || signal.industry.toLowerCase() === 'unknown' || signal.industry.trim() === '') {
-    missing.push('Industry is missing or "Unknown" — must be a real industry')
-  }
-  if (signal.signal_type === 'M&A Activity' && !signal.acquired_company) {
-    missing.push('M&A signal requires the acquired company name (for {{TargetCo}} token)')
-  }
-  if (signal.signal_type === 'Funding' && (!signal.industry || signal.industry.toLowerCase() === 'unknown')) {
-    missing.push('Funding signal requires a real industry (for {{Sector}} token)')
-  }
-
-  return missing
-}
-
 // Ensures a URL has a protocol so browsers don't treat it as a relative path.
 // e.g. "linkedin.com/in/foo" → "https://linkedin.com/in/foo"
 function safeUrl(url) {
@@ -300,6 +274,86 @@ function AcquiredCompanyEditor({ signalId, initialValue, onSaved }) {
         value={value}
         onChange={e => { setValue(e.target.value); setError('') }}
         placeholder="e.g. Acme Corp"
+        autoFocus
+        style={{
+          width: '100%', padding: '7px 9px', border: `1px solid ${error ? '#f87171' : '#d1d5db'}`,
+          borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box',
+        }}
+      />
+      {error && <span style={{ fontSize: '11px', color: '#dc2626' }}>{error}</span>}
+      <div style={{ display: 'flex', gap: '6px' }}>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          style={{
+            flex: 1, padding: '7px', backgroundColor: saving ? '#9ca3af' : '#004b5c',
+            color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px',
+            fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          onClick={() => { setEditing(false); setValue(initialValue || ''); setError('') }}
+          style={{
+            padding: '7px 12px', background: 'none', border: '1px solid #d1d5db',
+            borderRadius: '6px', fontSize: '12px', cursor: 'pointer', color: '#6b7280',
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Simple Field Editor — calls PATCH /api/signals/:id/field ─────────────────
+// Generic editor for any allowlisted field (e.g. acquired_company_industry).
+// Renders only the value + Edit/Add button and the save form — no label.
+
+function SimpleFieldEditor({ signalId, fieldName, initialValue, placeholder, onSaved }) {
+  const [editing, setEditing] = useState(false)
+  const [value,   setValue]   = useState(initialValue || '')
+  const [saving,  setSaving]  = useState(false)
+  const [error,   setError]   = useState('')
+
+  async function handleSave() {
+    if (!value.trim()) { setError('Required.'); return }
+    setSaving(true)
+    setError('')
+    try {
+      await api.patch(`/api/signals/${signalId}/field`, { field: fieldName, value: value.trim() })
+      onSaved(value.trim())
+      setEditing(false)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span style={{ fontSize: '13px', color: value ? '#2d2d2d' : '#9ca3af', fontFamily: value ? 'JetBrains Mono, monospace' : 'Inter, sans-serif' }}>
+          {value || 'Not set'}
+        </span>
+        <button
+          onClick={() => setEditing(true)}
+          style={{ fontSize: '11px', color: '#004b5c', background: 'none', border: 'none', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}
+        >
+          {value ? 'Edit' : 'Add'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+      <input
+        value={value}
+        onChange={e => { setValue(e.target.value); setError('') }}
+        placeholder={placeholder || ''}
         autoFocus
         style={{
           width: '100%', padding: '7px 9px', border: `1px solid ${error ? '#f87171' : '#d1d5db'}`,
@@ -1033,6 +1087,9 @@ export default function SignalDetail() {
                 {signal.signal_type === 'M&A Activity' && signal.acquired_company && (
                   <MetaRow label="Acquired Company">{signal.acquired_company}</MetaRow>
                 )}
+                {signal.signal_type === 'M&A Activity' && signal.acquired_company_industry && (
+                  <MetaRow label="Acquired Co. Industry">{signal.acquired_company_industry}</MetaRow>
+                )}
                 <MetaRow label="Date Detected">{signal.date_detected || '—'}</MetaRow>
                 <MetaRow label="Created At">{signal.created_at || '—'}</MetaRow>
               </div>
@@ -1120,11 +1177,11 @@ export default function SignalDetail() {
                 )
               })()}
 
-              {/* Acquired Company — M&A signals only */}
+              {/* Acquired Company + Industry — M&A signals only */}
               {signal.signal_type === 'M&A Activity' && (
                 <>
                   <div style={{ height: '1px', backgroundColor: '#e5e7eb', margin: '14px 0' }} />
-                  <div style={{ marginBottom: '4px' }}>
+                  <div style={{ marginBottom: '10px' }}>
                     <p style={{ fontSize: '11px', fontWeight: 600, color: '#6da3ab', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 6px' }}>
                       Acquired Company
                     </p>
@@ -1132,6 +1189,18 @@ export default function SignalDetail() {
                       signalId={signal.id}
                       initialValue={signal.acquired_company}
                       onSaved={(val) => setSignal(prev => ({ ...prev, acquired_company: val }))}
+                    />
+                  </div>
+                  <div style={{ marginBottom: '4px' }}>
+                    <p style={{ fontSize: '11px', fontWeight: 600, color: '#6da3ab', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 6px' }}>
+                      Acquired Co. Industry
+                    </p>
+                    <SimpleFieldEditor
+                      signalId={signal.id}
+                      fieldName="acquired_company_industry"
+                      initialValue={signal.acquired_company_industry}
+                      placeholder="e.g. software & saas"
+                      onSaved={(val) => setSignal(prev => ({ ...prev, acquired_company_industry: val }))}
                     />
                   </div>
                 </>
@@ -1194,7 +1263,7 @@ export default function SignalDetail() {
                       />
                     )}
 
-                    {validationMissing.some(f => f.toLowerCase().includes('acquired_company')) && (
+                    {validationMissing.some(f => f.toLowerCase().includes('acquired company')) && (
                       <InlineEditField
                         label="Acquired Company"
                         currentValue={signal.acquired_company || ''}

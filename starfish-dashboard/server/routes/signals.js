@@ -153,7 +153,7 @@ router.patch('/:id/field', async (req, res) => {
   }
 
   // Allowlist — ONLY these fields may be updated via this endpoint
-  const ALLOWED_FIELDS = ['industry', 'acquired_company']
+  const ALLOWED_FIELDS = ['industry', 'acquired_company', 'acquired_company_industry']
   if (!ALLOWED_FIELDS.includes(field)) {
     console.log(`[PATCH /api/signals/${id}/field] Rejected — field "${field}" not in allowlist`)
     return res.status(400).json({ success: false, error: `Field "${field}" cannot be edited` })

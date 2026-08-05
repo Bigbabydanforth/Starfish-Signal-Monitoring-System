@@ -37,7 +37,8 @@ function mapRecord(record) {
     hubspot_pushed: record.get('HubSpot Pushed') || false,
     send_day: record.get('Send Day') || null,
     created_at: record.get('Created At') || null,
-    acquired_company: record.get('Acquired Company') || null,
+    acquired_company:          record.get('Acquired Company') || null,
+    acquired_company_industry: record.get('Acquired Company Industry') || null,
     bespoke: record.get('Bespoke') === true,
     bespoke_reason: record.get('Bespoke Reason') || '',
     // Claude email generation fields
@@ -202,8 +203,9 @@ export async function updateAcquiredCompany(id, acquiredCompany) {
 // Allowlisted field names only — never write arbitrary field names to Airtable.
 export async function updateSignalField(id, fieldName, value) {
   const FIELD_MAP = {
-    industry:         'Industry',
-    acquired_company: 'Acquired Company',
+    industry:                  'Industry',
+    acquired_company:          'Acquired Company',
+    acquired_company_industry: 'Acquired Company Industry',
   }
   const airtableField = FIELD_MAP[fieldName]
   if (!airtableField) throw new Error(`Unknown field: ${fieldName}`)

@@ -350,8 +350,8 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
 
     // M&A-specific: acquired company name + industry
     ...(signalType === 'M&A Activity' && {
-      acquired_company:           signal.acquired_company || signal.deal?.seller || companyName,
-      acquired_company_industry:  signal.acquired_company_industry || industry || '',
+      acquired_company:           signal.acquired_company || signal.deal?.seller || null,
+      acquired_company_industry:  signal.acquired_company_industry || null,
     }),
   };
 

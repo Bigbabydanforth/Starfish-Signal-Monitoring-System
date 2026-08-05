@@ -1617,6 +1617,13 @@ function formatForAirtable(signal, broadcastContact, emailData = {}) {
       // Bespoke flag — set by Claude enrichment. Bespoke contacts require manual outreach, not sequences.
       'Bespoke':               signal.bespoke === true,
       'Bespoke Reason':        signal.bespoke_reason || '',
+      // M&A: always write acquired company name and industry so they're available in HubSpot
+      'Acquired Company':          signal.type === 'M&A Activity'
+                                     ? (signal.acquired_company || signal.deal?.seller || null)
+                                     : null,
+      'Acquired Company Industry': signal.type === 'M&A Activity'
+                                     ? (signal.acquired_company_industry || null)
+                                     : null,
 
       // Claude email generation fields.
       // Pipeline path: populated here when CLAUDE_EMAILS_ENABLED=true and contact is Claude group.

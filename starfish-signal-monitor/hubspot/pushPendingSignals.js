@@ -99,7 +99,8 @@ function mapRecord(record) {
     date_detected:   record.get('Date Detected')    || '',
     bespoke:         record.get('Bespoke') === true,
     bespoke_reason:  record.get('Bespoke Reason')   || '',
-    acquired_company:record.get('Acquired Company') || null,
+    acquired_company:          record.get('Acquired Company') || null,
+    acquired_company_industry: record.get('Acquired Company Industry') || null,
     deal: record.get('Acquired Company')
       ? { type: 'acquires', seller: record.get('Acquired Company'), amount: null }
       : null,

@@ -427,11 +427,18 @@ async function generateClaudeEmails(signal, contact) {
   // On parse failure, attempt light repair (smart quotes, stray control chars) before giving up.
   let emails;
   try {
-    const clean = rawText
+    // Strip markdown fences, then strip any preamble text before the first {
+    // (Claude occasionally adds "I notice..." commentary before the JSON object)
+    const stripped = rawText
       .replace(/^```json\s*/i, '')
       .replace(/^```\s*/i, '')
       .replace(/\s*```$/i, '')
       .trim();
+    // Find the email JSON object specifically — anchors to {"email_1 to avoid
+    // slicing at a stray { in preamble text (e.g. "Note: here's the JSON {")
+    const anchoredStart = stripped.indexOf('{"email_1');
+    const jsonStart     = anchoredStart >= 0 ? anchoredStart : stripped.indexOf('{');
+    const clean         = jsonStart > 0 ? stripped.slice(jsonStart) : stripped;
 
     let parsed = null;
 

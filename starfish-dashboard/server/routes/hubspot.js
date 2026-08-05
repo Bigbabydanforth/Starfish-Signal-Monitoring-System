@@ -122,7 +122,7 @@ router.post('/signals/:id/push-contact', async (req, res) => {
     abGroup:      signal.ab_test_group === 'claude' ? 'claude' : 'starfish',
   }
 
-  const pushResult = await pushSignalToHubSpot(signal, contact)
+  const pushResult = await pushSignalToHubSpot(signal, contact, id)
 
   if (pushResult.success || pushResult.reason === 'already_exists') {
     console.log(`[POST push-contact] ✓ ${contactEmail} pushed (signal: ${id})`)
