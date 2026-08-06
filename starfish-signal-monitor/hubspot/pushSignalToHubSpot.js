@@ -64,7 +64,7 @@ const SIGNAL_SOURCE_MAP = {
   'NewsAPI':      'NewsAPI',
   'MediaStack':   'MediaStack',
   'PredictLeads': 'PredictLeads',
-  'AudienceLab':  'AudienceLab Superpixel', // pixel segment default
+  'AudienceLab':  'AudienceLab SuperPixel', // pixel segment default
 };
 
 // ── Signal type → signal_source (takes priority over source field) ────────────
@@ -77,7 +77,7 @@ const SIGNAL_TYPE_SOURCE_MAP = {
   'News/Press':            'MediaStack',
   'Rebrand':               'MediaStack',
   'Funding':               'MediaStack',
-  'Website Visitor':       'AudienceLab Superpixel',
+  'Website Visitor':       'AudienceLab SuperPixel',
   'Brand Strategy Intent': 'AudienceLab Intent',
 };
 
@@ -265,31 +265,49 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
   const senderConfig = getSenderConfig(route?.ownerEmail || '');
 
   if (abGroup === 'claude') {
-    const emailResult = await generateClaudeEmails(signal, contact);
-    if (emailResult.success) {
-      // Pre-fill all tokens with real values — HubSpot does not substitute tokens
-      // inside contact property values, so we do it here before saving.
-      const tokenVars = {
-        contactFirstName: firstname,
-        contactCompany:   companyName,
-        senderFirstName:  senderConfig.firstName,
-        meetingLink:      senderConfig.meetingLink,
-      };
-      const emails = emailResult.emails;
+    // Short-circuit: if emails are already pre-generated on the signal (backlog push path),
+    // use them directly — do NOT call Claude again and waste tokens.
+    const preGenerated = signal.email_1_body && signal.email_1_subject;
+
+    if (preGenerated) {
+      console.log(`  [HubSpot Push] Using pre-generated Claude emails from Airtable`);
       claudeEmails = {
-        email_1_subject: substituteTokens(emails.email_1_subject, tokenVars),
-        email_1_body:    substituteTokens(emails.email_1_body,    tokenVars),
-        email_2_body:    substituteTokens(emails.email_2_body,    tokenVars),
-        email_3_body:    substituteTokens(emails.email_3_body,    tokenVars),
-        email_4_body:    substituteTokens(emails.email_4_body,    tokenVars),
-        email_5_body:    substituteTokens(emails.email_5_body,    tokenVars),
-        email_6_body:    substituteTokens(emails.email_6_body,    tokenVars),
-        ...(emails.email_7_body ? { email_7_body: substituteTokens(emails.email_7_body, tokenVars) } : {}),
+        email_1_subject: signal.email_1_subject,
+        email_1_body:    signal.email_1_body,
+        email_2_body:    signal.email_2_body    || null,
+        email_3_body:    signal.email_3_body    || null,
+        email_4_body:    signal.email_4_body    || null,
+        email_5_body:    signal.email_5_body    || null,
+        email_6_body:    signal.email_6_body    || null,
+        ...(signal.email_7_body ? { email_7_body: signal.email_7_body } : {}),
       };
-      console.log(`  [HubSpot Push] Claude emails generated (${emailResult.touchCount} touches)`);
     } else {
-      console.log(`  [HubSpot Push] ⚠️  Claude generation failed: ${emailResult.error} — falling back to Starfish`);
-      abGroup = 'starfish';
+      const emailResult = await generateClaudeEmails(signal, contact);
+      if (emailResult.success) {
+        // Pre-fill all tokens with real values — HubSpot does not substitute tokens
+        // inside contact property values, so we do it here before saving.
+        const tokenVars = {
+          contactFirstName: firstname,
+          contactCompany:   companyName,
+          senderFirstName:  senderConfig.firstName,
+          meetingLink:      senderConfig.meetingLink,
+        };
+        const emails = emailResult.emails;
+        claudeEmails = {
+          email_1_subject: substituteTokens(emails.email_1_subject, tokenVars),
+          email_1_body:    substituteTokens(emails.email_1_body,    tokenVars),
+          email_2_body:    substituteTokens(emails.email_2_body,    tokenVars),
+          email_3_body:    substituteTokens(emails.email_3_body,    tokenVars),
+          email_4_body:    substituteTokens(emails.email_4_body,    tokenVars),
+          email_5_body:    substituteTokens(emails.email_5_body,    tokenVars),
+          email_6_body:    substituteTokens(emails.email_6_body,    tokenVars),
+          ...(emails.email_7_body ? { email_7_body: substituteTokens(emails.email_7_body, tokenVars) } : {}),
+        };
+        console.log(`  [HubSpot Push] Claude emails generated (${emailResult.touchCount} touches)`);
+      } else {
+        console.log(`  [HubSpot Push] ⚠️  Claude generation failed: ${emailResult.error} — falling back to Starfish`);
+        abGroup = 'starfish';
+      }
     }
   }
 

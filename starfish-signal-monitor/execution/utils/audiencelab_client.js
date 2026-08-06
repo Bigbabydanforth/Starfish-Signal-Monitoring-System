@@ -130,9 +130,15 @@ async function fetchFromPage(segmentId, segmentLabel, startPage, maxRecordsNeede
 
     } catch (err) {
       const status = err.response?.status;
+
+      // 401 = invalid/expired API key — retrying won't help, stop immediately
+      if (status === 401) {
+        console.error(`[AudienceLab] ${segmentLabel} page ${page} failed (401 Unauthorized) — API key invalid or expired. Update AUDIENCELAB_API_KEY in Railway env vars.`);
+        break;
+      }
+
+      // 429 = rate limited — wait 60s then retry once
       if (status === 429) {
-        // Rate limited — AudienceLab uses a per-minute window.
-        // Wait 60s (full minute reset) then retry once. 10s was not long enough.
         console.warn(`[AudienceLab] ${segmentLabel} page ${page} rate limited (429) — waiting 60s for rate limit to reset...`);
         await new Promise(r => setTimeout(r, 60000));
         try {
@@ -151,6 +157,37 @@ async function fetchFromPage(segmentId, segmentLabel, startPage, maxRecordsNeede
           break;
         }
       }
+
+      // Network errors, 5xx server errors, timeouts — retry up to 3 times with 30s delay
+      const isRetryable = !status || status >= 500;
+      if (isRetryable) {
+        let retried = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          console.warn(`[AudienceLab] ${segmentLabel} page ${page} failed (${status ?? err.message}) — retrying in 30s (attempt ${attempt}/3)...`);
+          await new Promise(r => setTimeout(r, 30000));
+          try {
+            const retryRes = await axios.get(url, { headers: { 'X-Api-Key': API_KEY }, timeout: 15000 });
+            const data = retryRes.data;
+            totalPages = data.total_pages || totalPages;
+            records.push(...(data.data || []));
+            console.log(`[AudienceLab] ${segmentLabel} page ${page} — retry ${attempt} succeeded`);
+            page++;
+            if (page <= totalPages && records.length < maxRecordsNeeded) {
+              await new Promise(r => setTimeout(r, 400));
+            }
+            retried = true;
+            break;
+          } catch (retryErr) {
+            if (attempt === 3) {
+              console.error(`[AudienceLab] ${segmentLabel} page ${page} failed after 3 retries — stopping this segment`);
+            }
+          }
+        }
+        if (retried) continue;
+        break;
+      }
+
+      // Any other 4xx — don't retry
       console.error(`[AudienceLab] ${segmentLabel} page ${page} failed (${status ?? err.message}) — stopping`);
       break;
     }

@@ -1,41 +1,38 @@
 /**
- * push_backlog_signals.js
+ * scripts/push_backlog_signals.js
  *
- * Pushes old un-pushed Airtable records that now have real emails
- * (after re_enrich_contacts.js updated them).
+ * Pushes backlog signals to HubSpot in controlled batches with strict validation.
  *
- * Designed for the June 13 BSI backlog and other old signals outside
- * the 7-day window of the live push cron.
+ * Rules:
+ *   - Today's run: 400 total — 200 starfish group, 200 claude group
+ *   - Every contact pushed must have: email, company, industry, proof clients, send day
+ *   - M&A signals must also have: Acquired Company + Acquired Company Industry
+ *   - Claude group: must have Claude Generated = true AND all 7 email bodies
+ *   - Starfish group: emails NOT sent to HubSpot (uses pre-built HubSpot sequences)
+ *   - No duplicate contacts: one push per unique email address
+ *   - No already-pushed signals: HubSpot Pushed = TRUE records are skipped
+ *   - No duplicate contact names at same company: if same name appears for same company, push one only
+ *   - Proof clients are looked up live from data/proof_clients.js at push time
+ *   - All fields passed to pushSignalToHubSpot() which handles HubSpot upsert + sequence enrollment
  *
- * BSI dedup logic:
- *   BSI signals create 5 records per company (send_day 1–5 with the same email).
- *   For old backlog signals, staggered timing is irrelevant — we push ONCE per
- *   unique email and suppress all other send_day variants for that email.
- *   This prevents 5 sequence enrollments for the same person.
- *
- * Hard skips (same as pushPendingSignals.js):
- *   - No valid email (placeholder or empty)
- *   - No company name
- *   - No industry (needed for proof clients)
- *   - Claude group but no emails generated
- *
- * Run with:
+ * Run:
  *   node --env-file=.env scripts/push_backlog_signals.js              (preview)
  *   node --env-file=.env scripts/push_backlog_signals.js --live       (push to HubSpot)
- *   node --env-file=.env scripts/push_backlog_signals.js --batch=50   (limit per run)
- *   node --env-file=.env scripts/push_backlog_signals.js --date=2026-06-13  (specific date only)
+ *   node --env-file=.env scripts/push_backlog_signals.js --starfish=100 --claude=100  (custom counts)
  */
 
 import 'dotenv/config';
-import Airtable from 'airtable';
+import Airtable      from 'airtable';
 import { pushSignalToHubSpot } from '../hubspot/pushSignalToHubSpot.js';
-import { updateRecords } from '../execution/utils/airtable_client.js';
+import { updateRecords }       from '../execution/utils/airtable_client.js';
+import { getProofClients }     from '../data/proof_clients.js';
 
-const LIVE      = process.argv.includes('--live');
-const batchArg  = process.argv.find(a => a.startsWith('--batch='));
-const BATCH     = batchArg ? parseInt(batchArg.split('=')[1], 10) : Infinity;
-const dateArg   = process.argv.find(a => a.startsWith('--date='));
-const DATE_ONLY = dateArg ? dateArg.split('=')[1] : null;
+const LIVE = process.argv.includes('--live');
+
+const starfishArg = process.argv.find(a => a.startsWith('--starfish='));
+const claudeArg   = process.argv.find(a => a.startsWith('--claude='));
+const MAX_STARFISH = starfishArg ? parseInt(starfishArg.split('=')[1], 10) : 200;
+const MAX_CLAUDE   = claudeArg   ? parseInt(claudeArg.split('=')[1],   10) : 200;
 
 const PLACEHOLDER = 'email_not_unlocked@domain.com';
 const TABLE       = process.env.AIRTABLE_TABLE_NAME || 'Signals';
@@ -45,36 +42,30 @@ function getBase() {
     .base(process.env.AIRTABLE_BASE_ID);
 }
 
-function extractWebsiteFromContactInfo(contactInfo) {
-  if (!contactInfo) return null;
-  for (const line of contactInfo.split('\n')) {
-    const t = line.trim();
-    if (t.startsWith('Website: ')) return t.slice('Website: '.length).trim();
-    if (t.startsWith('Company Website: ')) return t.slice('Company Website: '.length).trim();
-  }
-  return null;
-}
+function pause(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function extractEmail(contactInfo) {
-  if (!contactInfo) return null;
-  const m = contactInfo.match(/[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/);
+function extractEmail(ci) {
+  if (!ci) return null;
+  const m = ci.match(/[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/);
   return m ? m[0].toLowerCase() : null;
 }
 
-function extractLinkedIn(contactInfo) {
-  if (!contactInfo) return null;
-  const m = contactInfo.match(/(https?:\/\/(?:www\.)?linkedin\.com\/\S+)/i);
+function extractLinkedIn(ci) {
+  if (!ci) return null;
+  const m = ci.match(/(https?:\/\/(?:www\.)?linkedin\.com\/\S+)/i);
   return m ? m[0] : null;
 }
 
-function parseName(contactInfo) {
-  if (!contactInfo) return { first_name: '', last_name: '', title: '', name: '' };
-  const lines = contactInfo.split('\n').map(l => l.trim()).filter(Boolean);
+function parseName(ci) {
+  if (!ci) return { name: '', first_name: '', last_name: '', title: '' };
+  const lines = ci.split('\n').map(l => l.trim()).filter(Boolean);
   let name = null, title = null;
   for (const line of lines) {
-    if (line.includes('@') || /linkedin\.com/i.test(line) || line.startsWith('http') || line.startsWith('⚠️') || line.startsWith('Website:')) continue;
-    if (!name) { name = line.replace(/^(name|title|email|linkedin)\s*:\s*/i, '').trim(); continue; }
-    if (!title) { title = line.replace(/^(name|title|email|linkedin)\s*:\s*/i, '').trim(); }
+    if (line.includes('@') || /linkedin\.com/i.test(line) ||
+        line.startsWith('http') || line.startsWith('⚠️') || line.startsWith('Website:')) continue;
+    const clean = line.replace(/^(name|title|email|linkedin)\s*:\s*/i, '').trim();
+    if (!name)  { name  = clean; continue; }
+    if (!title) { title = clean; break; }
   }
   const parts = (name || '').trim().split(/\s+/).filter(Boolean);
   return {
@@ -85,7 +76,41 @@ function parseName(contactInfo) {
   };
 }
 
-function pause(ms) { return new Promise(r => setTimeout(r, ms)); }
+// Skip check: returns a reason string if the record should be skipped, otherwise null.
+function skipReason(f, abGroup) {
+  const ci       = f['Contact Info'] || '';
+  const email    = extractEmail(ci);
+  const industry = (f['Industry'] || '').trim();
+
+  if (!email || email === PLACEHOLDER)                       return 'no valid email';
+  if (ci.includes('Research Needed'))                        return 'Research Needed';
+  if (ci.includes('Contact Needed'))                         return 'Contact Needed';
+  if (!f['Company Name']?.trim())                            return 'no company name';
+  if (!industry || industry.toLowerCase() === 'unknown')     return 'missing industry';
+  if (!f['Send Day'])                                        return 'missing send day';
+  if (!getProofClients(industry))                            return 'no proof clients for industry';
+
+  // M&A must have both acquired company fields
+  if (f['Signal Type'] === 'M&A Activity') {
+    if (!f['Acquired Company']?.trim())                      return 'M&A missing Acquired Company';
+    if (!f['Acquired Company Industry']?.trim())             return 'M&A missing Acquired Company Industry';
+  }
+
+  // Claude group must have emails generated.
+  // Website Visitor uses a 6-touch sequence — Email 7 Body is intentionally absent for that type.
+  if (abGroup === 'claude') {
+    if (f['Claude Generated'] !== true)                      return 'claude group: emails not generated';
+    if (!f['Email 1 Subject']?.trim())                       return 'claude group: missing Email 1 Subject';
+    const isWebsiteVisitor = f['Signal Type'] === 'Website Visitor';
+    const bodies = isWebsiteVisitor
+      ? ['Email 1 Body','Email 2 Body','Email 3 Body','Email 4 Body','Email 5 Body','Email 6 Body']
+      : ['Email 1 Body','Email 2 Body','Email 3 Body','Email 4 Body','Email 5 Body','Email 6 Body','Email 7 Body'];
+    const missing = bodies.filter(b => !f[b]?.trim());
+    if (missing.length > 0)                                  return `claude group: missing ${missing.join(', ')}`;
+  }
+
+  return null;
+}
 
 async function markPushed(recordId) {
   try {
@@ -106,44 +131,35 @@ async function suppress(recordId) {
 async function run() {
   console.log('════════════════════════════════════════════════════════════');
   console.log('PUSH BACKLOG SIGNALS TO HUBSPOT');
-  console.log('Scope: Un-pushed records with valid emails (outside 7-day cron window)');
-  console.log('BSI dedup: one push per unique email (suppress extra send_day records)');
-  if (DATE_ONLY) console.log(`Date filter: ${DATE_ONLY} only`);
-  if (BATCH < Infinity) console.log(`Batch: ${BATCH} records max`);
-  console.log(`Mode: ${LIVE ? 'LIVE (will push to HubSpot)' : 'PREVIEW (no changes)'}`);
+  console.log(`Mode    : ${LIVE ? 'LIVE — pushing to HubSpot' : 'PREVIEW — no changes'}`);
+  console.log(`Targets : ${MAX_STARFISH} starfish + ${MAX_CLAUDE} claude = ${MAX_STARFISH + MAX_CLAUDE} total`);
   console.log('════════════════════════════════════════════════════════════\n');
 
-  // Build filter
-  let filterFormula = `AND(
-    OR({HubSpot Pushed}=FALSE(), {HubSpot Pushed}=BLANK()),
-    NOT({Contact Info} = ""),
-    NOT(FIND("${PLACEHOLDER}", {Contact Info}) > 0)
-  )`;
-
-  if (DATE_ONLY) {
-    filterFormula = `AND(
-      OR({HubSpot Pushed}=FALSE(), {HubSpot Pushed}=BLANK()),
-      NOT({Contact Info} = ""),
-      NOT(FIND("${PLACEHOLDER}", {Contact Info}) > 0),
-      {Date Detected} = '${DATE_ONLY}'
-    )`;
-  }
-
-  console.log('Fetching un-pushed records from Airtable...');
+  console.log('Fetching all eligible unpushed records from Airtable...');
   let records;
   try {
     records = await getBase()(TABLE)
       .select({
-        filterByFormula: filterFormula,
+        filterByFormula: `AND(
+          OR({HubSpot Pushed}=FALSE(), {HubSpot Pushed}=BLANK()),
+          NOT({Contact Info} = ""),
+          NOT(FIND("${PLACEHOLDER}", {Contact Info}) > 0),
+          NOT(FIND("Research Needed", {Contact Info}) > 0),
+          NOT(FIND("Contact Needed", {Contact Info}) > 0),
+          NOT({Industry} = ""),
+          NOT({Send Day} = BLANK())
+        )`,
         fields: [
           'Company Name', 'Signal Type', 'Contact Info', 'Date Detected',
           'Company Website', 'Industry', 'Priority', 'Brief', 'Source URL',
           'Send Day', 'AB Test Group', 'Email Source', 'Bespoke', 'Bespoke Reason',
-          'Acquired Company', 'Claude Generated', 'Email 1 Subject', 'Email 1 Body',
-          'Email 2 Body', 'Email 3 Body', 'Email 4 Body',
+          'Acquired Company', 'Acquired Company Industry',
+          'Claude Generated', 'Email 1 Subject',
+          'Email 1 Body', 'Email 2 Body', 'Email 3 Body', 'Email 4 Body',
           'Email 5 Body', 'Email 6 Body', 'Email 7 Body',
+          'Proof Clients',
         ],
-        sort: [{ field: 'Send Day', direction: 'asc' }], // send_day 1 first
+        sort: [{ field: 'Date Detected', direction: 'asc' }],
       })
       .all();
   } catch (err) {
@@ -151,96 +167,145 @@ async function run() {
     process.exit(1);
   }
 
-  console.log(`Found ${records.length} eligible record(s)\n`);
+  console.log(`  Raw records fetched: ${records.length}\n`);
 
-  if (records.length === 0) {
-    console.log('Nothing to push. Run re_enrich_contacts.js --live first to find real emails.');
-    return;
-  }
-
-  // Group by email — keep only the FIRST (send_day 1) record per email.
-  // All other send_day records for the same email will be suppressed.
-  const seenEmails  = new Map(); // email → first record (to push)
-  const toSuppress  = [];        // record IDs to suppress (extra send_days)
+  // ── Deduplicate ────────────────────────────────────────────────────────────
+  // Rule 1: one push per unique email address (BSI broadcast = same email across 5 send_day records)
+  // Rule 2: one push per unique (contact name + company) combination — catches same person across signals
+  // Extra send_day records for the same email get suppressed (marked HubSpot Pushed = true)
+  const seenEmails   = new Map(); // email → first record
+  const seenNameKeys = new Set(); // "name||company" → already seen
+  const toSuppress   = [];        // extra BSI send_day records
 
   for (const r of records) {
-    const email = extractEmail(r.fields['Contact Info']);
+    const f       = r.fields;
+    const ci      = f['Contact Info'] || '';
+    const email   = extractEmail(ci);
     if (!email || email === PLACEHOLDER) continue;
 
-    if (!seenEmails.has(email)) {
-      seenEmails.set(email, r);
-    } else {
+    if (seenEmails.has(email)) {
       toSuppress.push(r.id);
-    }
-  }
-
-  const toPush = [...seenEmails.values()].slice(0, BATCH);
-
-  console.log(`Unique emails to push : ${toPush.length}`);
-  console.log(`BSI extras to suppress: ${toSuppress.length}\n`);
-
-  let pushed  = 0;
-  let skipped = 0;
-  let failed  = 0;
-
-  // Suppress BSI duplicates first
-  if (LIVE && toSuppress.length > 0) {
-    console.log(`Suppressing ${toSuppress.length} extra BSI send_day records...`);
-    for (const id of toSuppress) {
-      await suppress(id);
-      await pause(150);
-    }
-    console.log('  Done.\n');
-  } else if (toSuppress.length > 0) {
-    console.log(`Would suppress ${toSuppress.length} extra BSI send_day records.\n`);
-  }
-
-  // Push unique contacts
-  for (const record of toPush) {
-    const f           = record.fields;
-    const companyName = f['Company Name'] || '';
-    const signalType  = f['Signal Type']  || '';
-    const contactInfo = f['Contact Info'] || '';
-    const website     = f['Company Website'] || extractWebsiteFromContactInfo(contactInfo) || '';
-    const industry    = f['Industry'] || '';
-    const sendDay     = f['Send Day'] || 1;
-    const abGroup     = f['AB Test Group'] || undefined;
-    const emailSource = f['Email Source'] || 'Apollo';
-    const claudeGen   = f['Claude Generated'] === true;
-
-    const email   = extractEmail(contactInfo);
-    const linkedin= extractLinkedIn(contactInfo);
-    const parsed  = parseName(contactInfo);
-
-    console.log(`── ${companyName} [${signalType}] send_day:${sendDay}`);
-    console.log(`   Email   : ${email}`);
-    console.log(`   Contact : ${parsed.name || '—'} | ${parsed.title || '—'}`);
-
-    // Hard skips
-    if (!email || email === PLACEHOLDER) {
-      console.log(`   SKIP: no valid email\n`); skipped++; continue;
-    }
-    if (!companyName) {
-      console.log(`   SKIP: no company name\n`); skipped++; continue;
-    }
-    if (!industry || industry.trim().toLowerCase() === 'unknown') {
-      console.log(`   SKIP: no industry\n`); skipped++; continue;
-    }
-    if (abGroup === 'claude' && !claudeGen) {
-      console.log(`   SKIP: claude group but no emails generated\n`); skipped++; continue;
-    }
-
-    if (!LIVE) {
-      console.log(`   → WOULD PUSH to HubSpot\n`);
-      pushed++;
       continue;
     }
 
+    // Duplicate name+company check (different signals, same contact)
+    const parsed   = parseName(ci);
+    const nameKey  = `${(parsed.name || '').toLowerCase().trim()}||${(f['Company Name'] || '').toLowerCase().trim()}`;
+    if (parsed.name && seenNameKeys.has(nameKey)) {
+      console.log(`  [Dedup] Skipping duplicate contact: "${parsed.name}" @ ${f['Company Name']}`);
+      toSuppress.push(r.id);
+      continue;
+    }
+
+    seenEmails.set(email, r);
+    if (parsed.name) seenNameKeys.add(nameKey);
+  }
+
+  const deduped = [...seenEmails.values()];
+  console.log(`  After dedup: ${deduped.length} unique contacts (${toSuppress.length} extras to suppress)\n`);
+
+  // ── Split by AB group and apply per-group validation ──────────────────────
+  const starfishPool = [];
+  const claudePool   = [];
+  const skipLog      = [];
+
+  for (const r of deduped) {
+    const f       = r.fields;
+    const abGroup = (f['AB Test Group'] || '').toLowerCase();
+
+    if (abGroup !== 'starfish' && abGroup !== 'claude') {
+      skipLog.push({ company: f['Company Name'], reason: `unknown AB group: "${abGroup}"` });
+      continue;
+    }
+
+    const reason = skipReason(f, abGroup);
+    if (reason) {
+      skipLog.push({ company: f['Company Name'], reason });
+      continue;
+    }
+
+    if (abGroup === 'starfish') starfishPool.push(r);
+    else                        claudePool.push(r);
+  }
+
+  const starfishBatch = starfishPool.slice(0, MAX_STARFISH);
+  const claudeBatch   = claudePool.slice(0, MAX_CLAUDE);
+  const toPush        = [...starfishBatch, ...claudeBatch];
+
+  console.log('══ Eligible breakdown ══════════════════════════════════════');
+  console.log(`  Starfish pool  : ${starfishPool.length} → pushing ${starfishBatch.length}`);
+  console.log(`  Claude pool    : ${claudePool.length} → pushing ${claudeBatch.length}`);
+  console.log(`  Total to push  : ${toPush.length}`);
+  console.log(`  Skipped        : ${skipLog.length}`);
+  if (skipLog.length > 0) {
+    console.log('\n  Skip reasons (first 10):');
+    for (const s of skipLog.slice(0, 10)) {
+      console.log(`    ${(s.company || '?').padEnd(35)} — ${s.reason}`);
+    }
+    if (skipLog.length > 10) console.log(`    ... and ${skipLog.length - 10} more`);
+  }
+  console.log('');
+
+  if (toPush.length === 0) {
+    console.log('Nothing to push.');
+    return;
+  }
+
+  if (!LIVE) {
+    console.log('── Preview (first 15 contacts) ─────────────────────────────');
+    for (const r of toPush.slice(0, 15)) {
+      const f       = r.fields;
+      const parsed  = parseName(f['Contact Info'] || '');
+      const email   = extractEmail(f['Contact Info'] || '');
+      const abGroup = f['AB Test Group'] || '—';
+      const company = (f['Company Name'] || '').padEnd(30);
+      const type    = (f['Signal Type']  || '').padEnd(22);
+      console.log(`  [${abGroup.padEnd(8)}] ${company} | ${type} | Day ${f['Send Day']} | ${parsed.name || '—'} | ${email}`);
+    }
+    if (toPush.length > 15) console.log(`  ... and ${toPush.length - 15} more`);
+    console.log(`\nPREVIEW: Would push ${toPush.length} contacts (${starfishBatch.length} starfish + ${claudeBatch.length} claude).`);
+    console.log('Run with --live to apply.');
+    return;
+  }
+
+  // ── LIVE: suppress extras first, then push ────────────────────────────────
+  if (toSuppress.length > 0) {
+    console.log(`Suppressing ${toSuppress.length} duplicate send_day records...`);
+    for (const id of toSuppress) {
+      await suppress(id);
+      await pause(120);
+    }
+    console.log('  Done.\n');
+  }
+
+  let pushed = 0, skipped = 0, failed = 0;
+
+  for (let i = 0; i < toPush.length; i++) {
+    const record  = toPush[i];
+    const f       = record.fields;
+    const ci      = f['Contact Info'] || '';
+    const email   = extractEmail(ci);
+    const parsed  = parseName(ci);
+    const abGroup = (f['AB Test Group'] || '').toLowerCase();
+    const sendDay = f['Send Day'] || 1;
+    const company = f['Company Name'] || '';
+    const sigType = f['Signal Type']  || '';
+    const industry= f['Industry']     || '';
+
+    console.log(`[${i + 1}/${toPush.length}] [${abGroup}] ${company} [${sigType}] Day ${sendDay}`);
+    console.log(`  Contact : ${parsed.name || '—'} | ${parsed.title || '—'}`);
+    console.log(`  Email   : ${email}`);
+
+    // Build signal object — pass ALL fields through cleanly
     const signal = {
-      signal_type:    signalType,
-      type:           signalType,
-      company_name:   companyName,
-      company: { name: companyName, website, industry },
+      signal_type:    sigType,
+      type:           sigType,
+      company_name:   company,
+      company: {
+        name:     company,
+        website:  f['Company Website'] || '',
+        industry,
+      },
       industry,
       priority:       f['Priority']       || 'MEDIUM',
       brief:          f['Brief']          || '',
@@ -249,17 +314,20 @@ async function run() {
       date_detected:  f['Date Detected']  || '',
       bespoke:        f['Bespoke'] === true,
       bespoke_reason: f['Bespoke Reason'] || '',
-      acquired_company: f['Acquired Company'] || null,
-      claude_generated: claudeGen,
-      // Pass through pre-generated Claude emails if present
-      email_1_subject: f['Email 1 Subject'] || null,
-      email_1_body:    f['Email 1 Body']    || null,
-      email_2_body:    f['Email 2 Body']    || null,
-      email_3_body:    f['Email 3 Body']    || null,
-      email_4_body:    f['Email 4 Body']    || null,
-      email_5_body:    f['Email 5 Body']    || null,
-      email_6_body:    f['Email 6 Body']    || null,
-      email_7_body:    f['Email 7 Body']    || null,
+      acquired_company:          f['Acquired Company']          || null,
+      acquired_company_industry: f['Acquired Company Industry'] || null,
+
+      // Claude email fields — only used when abGroup = 'claude'
+      // pushSignalToHubSpot will use these directly instead of calling Claude again
+      // IF contact.abGroup is already set to 'claude' and emails are pre-generated
+      email_1_subject: abGroup === 'claude' ? (f['Email 1 Subject'] || null) : null,
+      email_1_body:    abGroup === 'claude' ? (f['Email 1 Body']    || null) : null,
+      email_2_body:    abGroup === 'claude' ? (f['Email 2 Body']    || null) : null,
+      email_3_body:    abGroup === 'claude' ? (f['Email 3 Body']    || null) : null,
+      email_4_body:    abGroup === 'claude' ? (f['Email 4 Body']    || null) : null,
+      email_5_body:    abGroup === 'claude' ? (f['Email 5 Body']    || null) : null,
+      email_6_body:    abGroup === 'claude' ? (f['Email 6 Body']    || null) : null,
+      email_7_body:    abGroup === 'claude' ? (f['Email 7 Body']    || null) : null,
     };
 
     const contact = {
@@ -268,42 +336,39 @@ async function run() {
       last_name:    parsed.last_name,
       email,
       title:        parsed.title,
-      linkedin_url: linkedin || '',
+      linkedin_url: extractLinkedIn(ci) || '',
       send_day:     sendDay,
-      email_source: emailSource,
+      email_source: f['Email Source'] || 'Apollo',
       abGroup,
     };
 
     try {
       const result = await pushSignalToHubSpot(signal, contact, record.id);
-      if (result.success) {
-        console.log(`   ✓ Pushed (${result.contactId || 'ok'}) [${result.abGroup || '—'}]`);
+      if (result.success || result.reason === 'already_exists') {
+        console.log(`  ✓ Pushed [${result.abGroup || abGroup}] (${result.contactId || 'ok'})`);
         await markPushed(record.id);
         pushed++;
       } else {
-        console.log(`   ✗ Failed: ${result.error || result.reason}`);
+        console.log(`  ✗ Failed: ${result.error || result.reason}`);
         failed++;
       }
     } catch (err) {
-      console.log(`   ✗ Error: ${err.message}`);
+      console.log(`  ✗ Error: ${err.message}`);
       failed++;
     }
 
-    console.log();
-    await pause(400);
+    console.log('');
+    await pause(500);
   }
 
   console.log('════════════════════════════════════════════════════════════');
-  if (LIVE) {
-    console.log(`Pushed   : ${pushed}`);
-    console.log(`Skipped  : ${skipped}`);
-    console.log(`Failed   : ${failed}`);
-    if (pushed > 0) console.log('\nContacts pushed — HubSpot workflow will enroll them in sequences.');
-  } else {
-    console.log(`Would push   : ${pushed}`);
-    console.log(`Would skip   : ${skipped}`);
-    console.log('\nPreview only. Run with --live to apply.');
-  }
+  console.log('RESULTS');
+  console.log('════════════════════════════════════════════════════════════');
+  console.log(`  Pushed          : ${pushed}`);
+  console.log(`  Failed          : ${failed}`);
+  console.log(`  Validation skip : ${skipped}`);
+  console.log(`  Starfish pushed : ${starfishBatch.length}`);
+  console.log(`  Claude pushed   : ${claudeBatch.length}`);
   console.log('════════════════════════════════════════════════════════════');
 }
 

@@ -1465,7 +1465,7 @@ function formatSignalDetails(signal) {
 
 // Maps a stored verification result to the Airtable "Email Verified" single-select field.
 function getEmailVerifiedStatus(verification) {
-  if (!verification) return '';
+  if (!verification) return null; // null clears the field — never write "" to a Single Select
   if (verification.reason === 'apollo_verified') return 'Verified';
   if (verification.reason === 'apollo_likely')   return 'Likely';
   if (verification.flagged === true)             return 'Risky (Flagged)';
