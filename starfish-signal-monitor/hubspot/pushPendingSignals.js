@@ -5,10 +5,10 @@
  * pushes each one to HubSpot via pushSignalToHubSpot(), then marks
  * HubSpot Pushed = true on success.
  *
- * Called by the 6 AM cron in main.js on Tuesday, Wednesday, Thursday:
- *   - Tuesday  6 AM → pushes Monday's signals
- *   - Wednesday 6 AM → pushes Wednesday's signals (pipeline ran at 5 AM same day)
- *   - Thursday  6 AM → pushes Thursday's signals (pipeline ran at 5 AM same day)
+ * Called by the 7:30 AM cron in main.js on Tuesday, Wednesday, Thursday:
+ *   - Tuesday  7:30 AM → pushes Monday's signals
+ *   - Wednesday 7:30 AM → pushes Wednesday's signals (pipeline ran earlier same day)
+ *   - Thursday  7:30 AM → pushes Thursday's signals (pipeline ran earlier same day)
  *
  * AUTO_PUSH_TO_HUBSPOT env var must be 'true' for live pushes.
  * When not set, runs in dry-run mode — logs intent but makes no API calls.

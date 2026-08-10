@@ -281,9 +281,9 @@ async function runAllWorkflows() {
   }
 }
 
-// --- Cron Schedule: 6:40 AM EST — Monday, Wednesday, Thursday only ---
+// --- Cron Schedule: 7:30 AM EST — Monday, Wednesday, Thursday only ---
 
-const cronSchedule = process.env.CRON_SCHEDULE || '40 6 * * 1,3,4';
+const cronSchedule = process.env.CRON_SCHEDULE || '30 7 * * 1,3,4';
 
 // Maximum time a single pipeline run is allowed before it is considered hung.
 // If the pipeline exceeds this, the cron guard fires a Telegram alert and

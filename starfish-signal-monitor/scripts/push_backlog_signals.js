@@ -31,8 +31,8 @@ const LIVE = process.argv.includes('--live');
 
 const starfishArg = process.argv.find(a => a.startsWith('--starfish='));
 const claudeArg   = process.argv.find(a => a.startsWith('--claude='));
-const MAX_STARFISH = starfishArg ? parseInt(starfishArg.split('=')[1], 10) : 200;
-const MAX_CLAUDE   = claudeArg   ? parseInt(claudeArg.split('=')[1],   10) : 200;
+const MAX_STARFISH = starfishArg ? parseInt(starfishArg.split('=')[1], 10) : 250;
+const MAX_CLAUDE   = claudeArg   ? parseInt(claudeArg.split('=')[1],   10) : 145;
 
 const PLACEHOLDER = 'email_not_unlocked@domain.com';
 const TABLE       = process.env.AIRTABLE_TABLE_NAME || 'Signals';

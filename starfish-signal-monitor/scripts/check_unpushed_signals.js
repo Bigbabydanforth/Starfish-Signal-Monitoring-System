@@ -118,6 +118,7 @@ async function run() {
   let noEmailContactNeeded  = 0; // ⚠️ Contact Needed — pipeline couldn't find anyone
   let noEmailResearchNeeded = 0; // 🔍 Research Needed — needs manual research
   let noEmailLinkedInOnly   = 0; // has LinkedIn URL but no email
+  let noEmailWebsiteOnly    = 0; // has a website URL but no email
   let noEmailTrulyEmpty     = 0; // completely blank Contact Info
 
   const noEmailByType = {};
@@ -148,6 +149,8 @@ async function run() {
         noEmailContactNeeded++;
       } else if (/linkedin\.com/i.test(contactInfo)) {
         noEmailLinkedInOnly++;
+      } else if (/https?:\/\//i.test(contactInfo)) {
+        noEmailWebsiteOnly++;
       } else {
         noEmailTrulyEmpty++;
       }
@@ -182,6 +185,7 @@ async function run() {
   console.log(`  ⚠️  Contact Needed (not found)     : ${noEmailContactNeeded}`);
   console.log(`  🔍 Research Needed (manual)        : ${noEmailResearchNeeded}`);
   console.log(`  🔗 LinkedIn only (no email)        : ${noEmailLinkedInOnly}`);
+  console.log(`  🌐 Website only (no email)         : ${noEmailWebsiteOnly}`);
   console.log(`  ❌ Truly empty Contact Info        : ${noEmailTrulyEmpty}`);
 
   if (Object.keys(noEmailByType).length > 0) {
