@@ -705,9 +705,13 @@ function passesJobTitleFilter(signal) {
     }
 
     const title = (signal.person?.title || '').toLowerCase().trim();
+
+    // No title or unknown — visiting the site is already a signal of intent.
+    // Pass through and let workflow_4 find the right contact via Apollo/Hunter.
     if (!title || title === 'unknown') {
-      console.log(`  [Filter] ❌ WV dropped — unknown title: ${firstName} ${lastName || ''} at ${signal.company?.name}`);
-      return false;
+      signal._no_identified_person = true;
+      console.log(`  [Filter] ⚠️  WV — no/unknown title for ${firstName} ${lastName || ''} at ${signal.company?.name} — will search for contact`);
+      return true;
     }
 
     // Marketing/brand C-suite — use word-boundary regex for short acronyms so
@@ -715,11 +719,9 @@ function passesJobTitleFilter(signal) {
     if (/\bcmo\b/.test(title) || /\bcbo\b/.test(title) || /\bcco\b/.test(title) ||
       title.includes('chief marketing') || title.includes('chief brand') || title.includes('chief communications')) return true;
 
-    // All other titles: must have seniority AND explicit marketing/brand relevance.
-    // VP is matched with a word-boundary regex (\bvp\b) so "VP, Marketing" (comma),
-    // "VP/Brand" (slash), or "VP" at end of string all match — not just "VP " (space only).
-    // Use word-boundary regex for short acronyms — 'coo'.includes() matches 'coordinator',
-    // 'ceo'.includes() would match 'grocery', etc. Long strings like 'director' are safe.
+    // Senior titles without a marketing keyword (CEO, COO, CFO, CTO, etc.) —
+    // a Website Visitor is already intent-qualified. Pass through and let workflow_4
+    // find the right marketing contact at the company instead of dropping the signal.
     const hasSeniority = (
       title.includes('chief') || title.includes('president') ||
       title.includes('vice president') || title.includes('svp') ||
@@ -727,10 +729,12 @@ function passesJobTitleFilter(signal) {
       /\bvp\b/.test(title) || /\bceo\b/.test(title) || /\bcoo\b/.test(title)
     );
 
+    if (hasSeniority) return true;
+
     const hasRelevance = ['marketing', 'brand', 'growth', 'communications'].some(k => title.includes(k));
 
-    if (!hasSeniority || !hasRelevance) {
-      console.log(`  [Filter] ❌ WV dropped — title not senior marketing/brand: "${signal.person.title}" at ${signal.company?.name}`);
+    if (!hasRelevance) {
+      console.log(`  [Filter] ❌ WV dropped — junior/irrelevant title: "${signal.person.title}" at ${signal.company?.name}`);
       return false;
     }
 

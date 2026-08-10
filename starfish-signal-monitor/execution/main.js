@@ -281,9 +281,9 @@ async function runAllWorkflows() {
   }
 }
 
-// --- Cron Schedule: 7:30 AM EST — Monday, Wednesday, Thursday only ---
+// --- Cron Schedule: 1:00 PM EST — Monday, Wednesday, Thursday only ---
 
-const cronSchedule = process.env.CRON_SCHEDULE || '30 7 * * 1,3,4';
+const cronSchedule = process.env.CRON_SCHEDULE || '0 13 * * 1,3,4';
 
 // Maximum time a single pipeline run is allowed before it is considered hung.
 // If the pipeline exceeds this, the cron guard fires a Telegram alert and
@@ -326,11 +326,11 @@ if (!process.argv.includes('--test') && !process.argv.includes('--manual')) {
   console.log(`[Cron] Scheduled: "${cronSchedule}" (America/New_York)`);
 
   // --- HubSpot Push Cron: 8 AM EST — Tuesday, Wednesday, Thursday only ---
-  // Pipeline fetches signals Mon/Wed/Thu at 6 AM. Contacts are pushed to HubSpot
-  // two hours later at 8 AM on Tue/Wed/Thu:
+  // Pipeline fetches signals Mon/Wed/Thu at 7:30 AM. Contacts are pushed to HubSpot
+  // at 8 AM on Tue/Wed/Thu:
   //   Monday pipeline    → pushed Tuesday 8 AM
-  //   Wednesday pipeline → pushed Wednesday 8 AM (same day, 2hrs after fetch)
-  //   Thursday pipeline  → pushed Thursday 8 AM (same day, 2hrs after fetch)
+  //   Wednesday pipeline → pushed Wednesday 8 AM (same day, after fetch)
+  //   Thursday pipeline  → pushed Thursday 8 AM (same day, after fetch)
   //
   // AUTO_PUSH_TO_HUBSPOT must be 'true' for live pushes. Dry-run otherwise.
   let isPushing = false;

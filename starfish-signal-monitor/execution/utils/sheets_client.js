@@ -59,9 +59,9 @@ function recordToRow(record) {
 }
 
 // ── Append rows to the sheet (used by daily pipeline) ────────────────────────
-// Uses spreadsheets.values.append which finds the true bottom of the sheet natively.
-// This is immune to gaps in column A (blank company names, manual edits, etc.)
-// that would cause getNextEmptyRow() to return a row that's too small and overwrite data.
+// Reads column A to find the true last populated row, then writes starting
+// from the next row. This avoids the Google Sheets append API inserting rows
+// in the middle of the sheet when empty rows exist below the data.
 // Never touches the dashboard header rows (1–4).
 async function appendRows(records) {
   if (!process.env.GOOGLE_SHEET_ID) {
@@ -73,15 +73,28 @@ async function appendRows(records) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
   const rows    = records.map(rec => recordToRow(rec));
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId:     sheetId,
-    range:             `${SHEET_NAME}!A${DATA_START_ROW}`,
-    valueInputOption:  'USER_ENTERED',
-    insertDataOption:  'INSERT_ROWS',
-    requestBody:       { values: rows }
+  // Find the true last populated row by reading all of column A.
+  // Filter out empty cells and take the count — the next empty row is count + 1.
+  // Minimum is DATA_START_ROW so we never overwrite the header rows (1–4).
+  const colA = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range:         `${SHEET_NAME}!A:A`,
+  });
+  const colAValues  = colA.data.values || [];
+  const lastDataRow = Math.max(
+    DATA_START_ROW - 1,
+    colAValues.reduce((max, row, idx) => (row[0] ? idx + 1 : max), 0)
+  );
+  const nextRow = lastDataRow + 1;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId:    sheetId,
+    range:            `${SHEET_NAME}!A${nextRow}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody:      { values: rows }
   });
 
-  console.log(`[Sheets] Appended ${rows.length} rows`);
+  console.log(`[Sheets] Appended ${rows.length} rows starting at row ${nextRow}`);
   return rows.length;
 }
 

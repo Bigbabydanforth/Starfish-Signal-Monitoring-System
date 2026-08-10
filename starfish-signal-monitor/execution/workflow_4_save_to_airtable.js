@@ -1611,7 +1611,7 @@ function formatForAirtable(signal, broadcastContact, emailData = {}) {
       'Status':                (signal._claude_failed || signal._enrichment_failed) ? 'Needs Review' : 'New',
       'Email Verified':        (broadcastContact && typeof broadcastContact === 'object' && broadcastContact.email)
                                  ? getEmailVerifiedStatus(broadcastContact.emailVerification)
-                                 : '',
+                                 : null,
       // Send Day: 1–5 stagger for broadcast contacts (BSI and non-BSI). null for legacy single-contact signals.
       'Send Day':              (broadcastContact && typeof broadcastContact === 'object') ? (broadcastContact.send_day || null) : null,
       // Bespoke flag — set by Claude enrichment. Bespoke contacts require manual outreach, not sequences.

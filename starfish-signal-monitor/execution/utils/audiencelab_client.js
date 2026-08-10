@@ -277,19 +277,26 @@ async function fetchAudienceLabSignals() {
       const companyName = (record.COMPANY_NAME || '').trim();
       if (!companyName) { pixelSkipped++; continue; }
 
-      // Require a valid EVENT_TIMESTAMP — records with no timestamp or an invalid/garbled date
-      // are dropped. Without a timestamp we cannot verify recency, so we treat them as stale.
-      // This also prevents a corrupt date string from reaching Airtable's Date Detected field.
-      if (!record.EVENT_TIMESTAMP) { pixelSkipped++; continue; }
-      const visitDate = new Date(record.EVENT_TIMESTAMP);
-      if (isNaN(visitDate.getTime())) { pixelSkipped++; continue; } // garbled date — drop
-      if (visitDate < cutoff30) { pixelSkipped++; continue; }       // older than 30 days — drop
+      // Use EVENT_TIMESTAMP for recency check and Date Detected.
+      // If missing or garbled, fall back to today's date instead of dropping the record.
+      let detectedDate;
+      if (!record.EVENT_TIMESTAMP) {
+        detectedDate = todayStr;
+        console.log(`  [AudienceLab/Pixel] ⚠️  ${companyName} — no EVENT_TIMESTAMP, using today's date`);
+      } else {
+        const visitDate = new Date(record.EVENT_TIMESTAMP);
+        if (isNaN(visitDate.getTime())) {
+          detectedDate = todayStr;
+          console.log(`  [AudienceLab/Pixel] ⚠️  ${companyName} — garbled EVENT_TIMESTAMP "${record.EVENT_TIMESTAMP}", using today's date`);
+        } else {
+          if (visitDate < cutoff30) { pixelSkipped++; continue; } // older than 30 days — drop
+          detectedDate = record.EVENT_TIMESTAMP.split('T')[0];
+        }
+      }
 
       const normalized = normalizeName(companyName);
       if (existingNames.has(normalized) || seenThisRun.has(normalized)) { pixelSkipped++; continue; }
       seenThisRun.add(normalized);
-
-      const detectedDate = record.EVENT_TIMESTAMP.split('T')[0];
 
       allSignals.push({
         type:       'Website Visitor',

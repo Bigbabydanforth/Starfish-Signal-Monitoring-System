@@ -163,15 +163,28 @@ async function syncToSheets(verifiedSignals) {
       const DATA_START_ROW = 5;
       const rows = verifiedSignals.map(signalToRow);
 
-      await sheets.spreadsheets.values.append({
+      // Find true last populated row in column A to avoid inserting in the middle
+      // when empty rows exist below the data (Google append API mis-detects table end).
+      const colA = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range:         'Signals!A:A',
+      });
+      const colAValues  = colA.data.values || [];
+      const lastDataRow = Math.max(
+        DATA_START_ROW - 1,
+        colAValues.reduce((max, row, idx) => (row[0] ? idx + 1 : max), 0)
+      );
+      const nextRow = lastDataRow + 1;
+
+      await sheets.spreadsheets.values.update({
         spreadsheetId:    sheetId,
-        range:            `Signals!A${DATA_START_ROW}`,
+        range:            `Signals!A${nextRow}`,
         valueInputOption: 'USER_ENTERED',
         requestBody:      { values: rows }
       });
 
       inserted = rows.length;
-      console.log(`[Sheets] Appended ${inserted} rows (from memory) to Google Sheet`);
+      console.log(`[Sheets] Appended ${inserted} rows (from memory) starting at row ${nextRow}`);
 
     } else {
       // Standard path — query main Airtable base and sync

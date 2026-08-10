@@ -5,10 +5,10 @@
  * pushes each one to HubSpot via pushSignalToHubSpot(), then marks
  * HubSpot Pushed = true on success.
  *
- * Called by the 7:30 AM cron in main.js on Tuesday, Wednesday, Thursday:
- *   - Tuesday  7:30 AM → pushes Monday's signals
- *   - Wednesday 7:30 AM → pushes Wednesday's signals (pipeline ran earlier same day)
- *   - Thursday  7:30 AM → pushes Thursday's signals (pipeline ran earlier same day)
+ * Called by the 8 AM cron in main.js on Tuesday, Wednesday, Thursday:
+ *   - Tuesday   8 AM → pushes Monday's signals
+ *   - Wednesday 8 AM → pushes Wednesday's signals (pipeline ran at 7:30 AM same day)
+ *   - Thursday  8 AM → pushes Thursday's signals (pipeline ran at 7:30 AM same day)
  *
  * AUTO_PUSH_TO_HUBSPOT env var must be 'true' for live pushes.
  * When not set, runs in dry-run mode — logs intent but makes no API calls.
@@ -146,10 +146,10 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
   let failed  = 0;
   let skipped = 0;
 
-  // Only push signals from the last 7 days — prevents mass-pushing thousands of old records.
-  // Monday pipeline runs → Tuesday 6AM cron pushes Monday's signals (within the 7-day window).
+  // Only push signals from the last 3 days — prevents mass-pushing old records.
+  // Monday pipeline runs → Tuesday 8AM cron pushes Monday's signals (within the 3-day window).
   const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - 7);
+  cutoffDate.setDate(cutoffDate.getDate() - 3);
   const cutoffStr = cutoffDate.toISOString().split('T')[0]; // YYYY-MM-DD
 
   const filterFormula = `AND(
@@ -171,7 +171,7 @@ export async function pushPendingSignals({ dryRun = false } = {}) {
     return { pushed: 0, failed: 0, skipped: 0, dryRun };
   }
 
-  console.log(`[HubSpot Push] Found ${records.length} unpushed record(s) from last 7 days (cutoff: ${cutoffStr})`);
+  console.log(`[HubSpot Push] Found ${records.length} unpushed record(s) from last 3 days (cutoff: ${cutoffStr})`);
 
   for (const record of records) {
     const signal  = mapRecord(record);
