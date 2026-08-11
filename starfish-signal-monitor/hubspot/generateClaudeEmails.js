@@ -63,7 +63,10 @@ Voice and style (fixed)
 Personalization tokens (write these literally, exactly as shown — spaces inside braces are required)
 - {{ contact.firstname }} — greeting. ALWAYS open each email body with "Hi {{ contact.firstname }}," on the first line. Never skip "Hi". Fallback: there.
 - {{ contact.company }} — the prospect's company. Fallback: your brand.
-- Sign off with "Best," on its own line, then the sender's first name token — do not hardcode a person's name (these sequences are sender-agnostic). Use {{ sender.firstname }}.
+- End every email body with "Best," on its own line. Do not write a name, token, or anything after it — the sender's signature is appended automatically by HubSpot. The last two characters of every email body must be "st," (i.e. ending with "Best,"). Example of correct closing:
+...your closing sentence here.
+
+Best,
 - For signal-specific values (acquired company name, sector, etc.) write the ACTUAL VALUE directly — do not use placeholder tokens.
 
 OUTPUT FORMAT — CRITICAL:
