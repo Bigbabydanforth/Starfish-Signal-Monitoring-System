@@ -11,7 +11,7 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
-async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailSuccess, startTime, pdlPagination = null) {
+async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailSuccess, startTime, pdlPagination = null, claudeEmailsGenerated = 0) {
   try {
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     const date     = formatDisplayDate(new Date());
@@ -91,6 +91,9 @@ async function sendTelegramMonitoring(deduplicatedSignals, airtableCount, emailS
       }
     }
 
+    if (claudeEmailsGenerated > 0) {
+      message += `\n🤖 Claude emails generated: ${claudeEmailsGenerated}`;
+    }
     message += `\n⏱️ Total execution time: ${duration}s`;
 
     // Truncate if over Telegram's 4096 char limit

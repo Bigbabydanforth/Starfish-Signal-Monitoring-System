@@ -91,6 +91,19 @@ Only email_1_subject exists. Touches 2-7 are replies on the same thread so they 
 Each email body must be plain text with one exception: meeting links must be written as HTML anchor tags, e.g. <a href="URL">Grab 20 minutes with me</a>. No other HTML. No markdown. Use line breaks for paragraph spacing. Do not include a signature — it is appended automatically.
 `;
 
+// ── MASTER PROMPT TOKEN ESTIMATE ─────────────────────────────────────────────
+// Runs at module load. Anthropic requires ≥1,024 tokens before a cache breakpoint
+// to activate caching. Estimate: 1 token ≈ 4 characters (rough but reliable for English prose).
+// If estimated tokens < 1,024, the cache breakpoint is silently ignored — no savings.
+{
+  const estimatedTokens = Math.round(MASTER_PROMPT.length / 4);
+  if (estimatedTokens < 1024) {
+    console.warn(`[Email Gen] ⚠️  MASTER_PROMPT estimated tokens: ${estimatedTokens} — BELOW 1,024 minimum. Cache breakpoint will be silently ignored. Expand the prompt.`);
+  } else {
+    console.log(`[Email Gen] MASTER_PROMPT estimated tokens: ${estimatedTokens} — cache breakpoint active ✓`);
+  }
+}
+
 // ── PART 2: SIGNAL BLOCKS ────────────────────────────────────────────────────
 // Each key maps a signal_type string to its Section 2 block from the briefs document
 // (Starfish Signal Email Briefs v1).
@@ -379,10 +392,11 @@ reaching out based on your knowledge of the industry — nothing more.
  */
 async function generateClaudeEmails(signal, contact) {
   const signalType      = signal.type || signal.signal_type || '';
+  const companyName     = signal.company_name || signal.company?.name || 'Unknown Company';
   const isWebsiteVisitor = ['Website Visitor', 'website_visitor'].includes(signalType);
   const touchCount      = isWebsiteVisitor ? 6 : 7;
 
-  console.log(`[Email Gen] Starting generation for: ${signal.company_name || signal.company?.name} — ${signalType} (${touchCount} touches)`);
+  console.log(`[Email Gen] Starting generation for: ${companyName} — ${signalType} (${touchCount} touches)`);
 
   // Validate required fields before calling Claude
   const firstName = contact.firstName || contact.first_name || contact.name?.split(' ')[0];
@@ -402,18 +416,58 @@ async function generateClaudeEmails(signal, contact) {
     return { success: false, error: `Unknown signal type: ${signalType}` };
   }
 
-  // Assemble the 3-part prompt
-  const prospectData    = assembleProspectData(signal, contact);
-  const assembledPrompt = `${MASTER_PROMPT}\n\n${signalBlock}\n\n${prospectData}`;
+  // Assemble Part 3 (prospect data — unique per contact, never cached)
+  const prospectData = assembleProspectData(signal, contact);
 
-  // Call Claude Sonnet — NOT Haiku
+  // Call Claude Sonnet with prompt caching.
+  //
+  // Parts 1 and 2 go into `system` with cache_control breakpoints:
+  //   Breakpoint 1 (after MASTER_PROMPT): hits on every call regardless of signal type.
+  //   Breakpoint 2 (after signalBlock):   hits when multiple contacts share the same signal type.
+  //
+  // Part 3 (prospectData) goes into `messages` — it changes every call so must never
+  // be before a cache breakpoint or it would invalidate the cache on every call.
+  //
+  // Cache TTL: ephemeral = 5 minutes. Resets on every cache hit, so the cache stays
+  // warm for the entire pipeline batch (contacts are processed faster than 5 min apart).
   let rawText;
+  let cacheStats = { cacheWrite: 0, cacheRead: 0, freshInput: 0 };
   try {
     const response = await anthropic.messages.create({
       model:      'claude-sonnet-4-6',
       max_tokens: 4000,
-      messages:   [{ role: 'user', content: assembledPrompt }],
+      system: [
+        {
+          type:          'text',
+          text:          MASTER_PROMPT.trim(),
+          cache_control: { type: 'ephemeral' },  // Breakpoint 1 — Part 1 alone, hits every call
+        },
+        {
+          type:          'text',
+          text:          signalBlock.trim(),
+          cache_control: { type: 'ephemeral' },  // Breakpoint 2 — Part 1+2, hits same signal type
+        },
+      ],
+      messages: [
+        {
+          role:    'user',
+          content: prospectData.trim(),          // Part 3 — dynamic per contact, never cached
+        },
+      ],
     });
+
+    // Log cache usage so Railway logs show savings per call
+    const usage      = response.usage || {};
+    const cacheWrite = usage.cache_creation_input_tokens || 0;
+    const cacheRead  = usage.cache_read_input_tokens     || 0;
+    const freshInput = usage.input_tokens                || 0;
+    cacheStats = { cacheWrite, cacheRead, freshInput };
+
+    if (cacheRead > 0) {
+      console.log(`[Email Gen] Cache HIT — ${cacheRead} cached tokens + ${freshInput} fresh tokens (${companyName})`);
+    } else if (cacheWrite > 0) {
+      console.log(`[Email Gen] Cache WRITE — ${cacheWrite} tokens written to cache + ${freshInput} fresh tokens (${companyName})`);
+    }
 
     rawText = response.content[0]?.text;
     if (!rawText) {
@@ -501,7 +555,7 @@ async function generateClaudeEmails(signal, contact) {
   console.log(`[Email Gen] ✓ Generated ${touchCount} emails for ${signal.company_name || signal.company?.name}`);
   requiredKeys.forEach(k => console.log(`  ${k}: ${emails[k].slice(0, 60).replace(/\n/g, ' ')}...`));
 
-  return { success: true, emails, touchCount };
+  return { success: true, emails, touchCount, cacheStats };
 }
 
 export { generateClaudeEmails, getSignalBlock, assembleProspectData };

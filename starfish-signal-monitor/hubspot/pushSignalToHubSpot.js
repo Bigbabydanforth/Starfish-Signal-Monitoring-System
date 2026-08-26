@@ -303,7 +303,13 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
           email_6_body:    substituteTokens(emails.email_6_body,    tokenVars),
           ...(emails.email_7_body ? { email_7_body: substituteTokens(emails.email_7_body, tokenVars) } : {}),
         };
-        console.log(`  [HubSpot Push] Claude emails generated (${emailResult.touchCount} touches)`);
+        const cs        = emailResult.cacheStats || {};
+        const cacheNote = cs.cacheRead  > 0
+          ? ` | cache HIT (${cs.cacheRead} tokens)`
+          : cs.cacheWrite > 0
+            ? ` | cache WRITE (${cs.cacheWrite} tokens)`
+            : ` | no cache`;
+        console.log(`  [HubSpot Push] Claude emails generated (${emailResult.touchCount} touches${cacheNote})`);
       } else {
         console.log(`  [HubSpot Push] ⚠️  Claude generation failed: ${emailResult.error} — falling back to Starfish`);
         abGroup = 'starfish';

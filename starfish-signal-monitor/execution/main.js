@@ -194,6 +194,7 @@ async function runAllWorkflows() {
   let filteredSignals = [];
   let deduplicatedSignals = [];
   let totalInserted = 0;
+  let claudeEmailsGenerated = 0;
   let emailSuccess = false;
   let pdlPagination = null;
 
@@ -227,7 +228,7 @@ async function runAllWorkflows() {
 
       // Workflow 4: Save to Airtable
       console.log(`\n[${new Date().toISOString()}] --- Workflow 4: Save to Airtable ---`);
-      totalInserted = await saveToAirtable(deduplicatedSignals);
+      ({ totalInserted, claudeEmailsGenerated } = await saveToAirtable(deduplicatedSignals));
       console.log(`[${new Date().toISOString()}] Workflow 4 complete: ${totalInserted} records saved`);
 
       // Commit AudienceLab cursor ONLY after Airtable save succeeds.
@@ -256,7 +257,7 @@ async function runAllWorkflows() {
     // Workflow 6: Telegram monitoring — always runs, even after errors
     try {
       console.log(`\n[${new Date().toISOString()}] --- Workflow 6: Telegram Monitoring ---`);
-      await sendTelegramMonitoring(deduplicatedSignals, totalInserted, emailSuccess, startTime, pdlPagination);
+      await sendTelegramMonitoring(deduplicatedSignals, totalInserted, emailSuccess, startTime, pdlPagination, claudeEmailsGenerated);
     } catch (err) {
       // Should never throw (telegram_client catches internally), but belt-and-suspenders
       console.error('[Telegram] Unexpected error in monitoring workflow:', err.message);

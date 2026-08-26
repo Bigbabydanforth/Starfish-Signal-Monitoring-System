@@ -1867,7 +1867,7 @@ async function saveToAirtable(deduplicatedSignals) {
 
   if (deduplicatedSignals.length === 0) {
     console.log('[Airtable] No signals to save — skipping');
-    return 0;
+    return { totalInserted: 0, claudeEmailsGenerated: 0 };
   }
 
   // Per-run Apollo enrichment cache — avoids duplicate API calls for the same company
@@ -3695,6 +3695,8 @@ Status:            ${status}
   // Manual push from the dashboard is the primary path until then.
   const AUTO_PUSH_TO_HUBSPOT = process.env.AUTO_PUSH_TO_HUBSPOT === 'true';
 
+  let claudeEmailsGenerated = 0;
+
   if (AUTO_PUSH_TO_HUBSPOT) {
     console.log('\n[HubSpot Auto-Push] Auto-push enabled — pushing signals to HubSpot CRM...');
     for (const signal of deduplicatedSignals) {
@@ -3715,6 +3717,7 @@ Status:            ${status}
           const pushResult = await pushSignalToHubSpot(signal, contact, airtableRecordId);
           if (pushResult.success) {
             console.log(`[HubSpot Auto-Push] ✓ ${signal.company?.name || '?'} / ${contact.email} pushed successfully`);
+            if (pushResult.abGroup === 'claude') claudeEmailsGenerated++;
           } else {
             console.log(`[HubSpot Auto-Push] ✗ Push failed for ${signal.company?.name || '?'} / ${contact.email}: ${pushResult.error || pushResult.reason}`);
           }
@@ -3727,7 +3730,7 @@ Status:            ${status}
     console.log('[HubSpot Auto-Push] Complete.');
   }
 
-  return totalInserted;
+  return { totalInserted, claudeEmailsGenerated };
 }
 
 export default saveToAirtable;
