@@ -12,7 +12,7 @@
  *   - Deduplicates by email — one generation per unique contact
  *   - For BSI signals with the same email across multiple send_day records,
  *     the same generated emails are written to ALL matching records
- *   - On success: writes Email 1 Subject, Email 1-7 Body, Claude Generated = true,
+ *   - On success: writes Email 1-10 Subject + Body (1-9 for Website Visitor), Claude Generated = true,
  *     Claude Generated At to Airtable
  *   - On failure (Claude API error or bad JSON): skips and logs — does NOT write partial data
  *
@@ -36,8 +36,8 @@ function getSenderEmailForType(signalType) {
   const ZACK  = process.env.ZACK_SENDER_EMAIL  || 'zack@starfishco.com';
   const COLE  = process.env.COLE_SENDER_EMAIL  || 'cole@starfishco.com';
   if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return DAVID;
-  if (signalType === 'Website Visitor') return ZACK;
-  return COLE; // News/Press, Rebrand, Brand Strategy Intent
+  if (['Website Visitor', 'Rebrand'].includes(signalType)) return ZACK;
+  return COLE; // News/Press, Brand Strategy Intent
 }
 
 function getSenderConfig(ownerEmail) {
@@ -46,14 +46,16 @@ function getSenderConfig(ownerEmail) {
 
 // Replaces all tokens with real values before writing to Airtable.
 // Mirrors pushSignalToHubSpot.js substituteTokens — must stay in sync.
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink }) {
+function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,    contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,      contactCompany   || 'your company')
     .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     senderFirstName  || '')
-    .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '');
+    .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
+    .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
+    .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
 }
 
 const LIVE      = process.argv.includes('--live');
@@ -256,6 +258,8 @@ async function run() {
       contactCompany:   company,
       senderFirstName:  sender.firstName,
       meetingLink:      sender.meetingLink,
+      targetCo:         signal.acquired_company || null,
+      sector:           industry,
     };
 
     // Substitute all tokens before writing — no {{ }} left in Airtable
@@ -266,14 +270,29 @@ async function run() {
     const emailFields = {
       'Claude Generated':    true,
       'Claude Generated At': generatedAt,
-      'Email 1 Subject':     subst(emails.email_1_subject) || null,
-      'Email 1 Body':        subst(emails.email_1_body)    || null,
-      'Email 2 Body':        subst(emails.email_2_body)    || null,
-      'Email 3 Body':        subst(emails.email_3_body)    || null,
-      'Email 4 Body':        subst(emails.email_4_body)    || null,
-      'Email 5 Body':        subst(emails.email_5_body)    || null,
-      'Email 6 Body':        subst(emails.email_6_body)    || null,
-      'Email 7 Body':        subst(emails.email_7_body)    || null,
+      'Email 1 Subject':     subst(emails.email_1_subject)  || null,
+      'Email 1 Body':        subst(emails.email_1_body)     || null,
+      'Email 2 Subject':     subst(emails.email_2_subject)  || null,
+      'Email 2 Body':        subst(emails.email_2_body)     || null,
+      'Email 3 Subject':     subst(emails.email_3_subject)  || null,
+      'Email 3 Body':        subst(emails.email_3_body)     || null,
+      'Email 4 Subject':     subst(emails.email_4_subject)  || null,
+      'Email 4 Body':        subst(emails.email_4_body)     || null,
+      'Email 5 Subject':     subst(emails.email_5_subject)  || null,
+      'Email 5 Body':        subst(emails.email_5_body)     || null,
+      'Email 6 Subject':     subst(emails.email_6_subject)  || null,
+      'Email 6 Body':        subst(emails.email_6_body)     || null,
+      'Email 7 Subject':     subst(emails.email_7_subject)  || null,
+      'Email 7 Body':        subst(emails.email_7_body)     || null,
+      'Email 8 Subject':     subst(emails.email_8_subject)  || null,
+      'Email 8 Body':        subst(emails.email_8_body)     || null,
+      'Email 9 Subject':     subst(emails.email_9_subject)  || null,
+      'Email 9 Body':        subst(emails.email_9_body)     || null,
+      // Website Visitor uses 9 emails — omit Email 10 to avoid clearing any existing value
+      ...(signalType !== 'Website Visitor' ? {
+        'Email 10 Subject': subst(emails.email_10_subject) || null,
+        'Email 10 Body':    subst(emails.email_10_body)    || null,
+      } : {}),
     };
 
     // Write to ALL Airtable records sharing this email (BSI send_day tiers)

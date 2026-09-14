@@ -40,6 +40,8 @@ import { findBroadcastContacts }     from '../execution/utils/broadcast_contacts
 import { getKnownDomain }            from '../execution/utils/known_domains.js';
 import { getProofClients }           from '../data/proof_clients.js';
 import { assignAbGroup }             from '../hubspot/pushSignalToHubSpot.js';
+import { findEmailWithPuppeteer, closeBrowser } from '../execution/utils/puppeteer_email_finder.js';
+import { isFakeEmail, verifyEmail }  from '../execution/utils/email_validator.js';
 
 const LIVE          = process.argv.includes('--live');
 const batchArg      = process.argv.find(a => a.startsWith('--batch='));
@@ -286,13 +288,76 @@ async function run() {
       if (acquiredCompany) console.log(`   [M&A] Acquired company: ${acquiredCompany}`);
     }
 
+    // ── Puppeteer fallback (once per company) ─────────────────────────────────
+    // Same logic as the main pipeline (workflow_4_save_to_airtable.js Step 3).
+    // Only runs when Apollo + Hunter both found nothing with a real email.
+    // One Puppeteer call per company — result shared across all records for that company.
+    const anyContactWithEmail = broadcastContacts.find(c => c.email) || null;
+    let puppeteerContactInfo  = null; // will be set if Puppeteer finds a valid email
+
+    if (!anyContactWithEmail && domain) {
+      // Same title strings as the pipeline, keyed by signal type
+      const puppeteerTitle = signalType === 'M&A Activity'
+        ? 'CEO OR CMO OR CFO OR COO OR CIO OR CHRO OR President OR "Managing Partner"'
+        : 'CMO OR "VP Marketing" OR "Chief Marketing Officer"';
+
+      console.log(`   [Puppeteer] Searching ${companyName} for "${puppeteerTitle}"...`);
+      try {
+        const puppeteerResult = await findEmailWithPuppeteer(
+          companyName,
+          knownWebsite || `https://${domain}`,
+          puppeteerTitle
+        );
+
+        if (puppeteerResult?.email && !isFakeEmail(puppeteerResult.email)) {
+          // Domain mismatch check — same as pipeline
+          const trustedDomain = getKnownDomain(companyName) || domain;
+          const emailDomain   = puppeteerResult.email.split('@')[1]?.toLowerCase() || '';
+
+          if (trustedDomain && !emailDomain.endsWith(trustedDomain)) {
+            console.log(`   [Puppeteer] ❌ Rejected ${puppeteerResult.email} — domain mismatch (expected ${trustedDomain})`);
+          } else {
+            // Email verification — same as pipeline: verifyEmail(email, 'puppeteer', null)
+            const { valid, flagged, reason } = await verifyEmail(puppeteerResult.email, 'puppeteer', null);
+            await pause(400); // same 400ms pause as pipeline
+            if (valid) {
+              const flagNote = flagged ? ' [unverified]' : '';
+              puppeteerContactInfo = `Email: ${puppeteerResult.email}${flagNote} (via ${puppeteerResult.source})`;
+              if (flagged) console.log(`   [Puppeteer] ⚠️  ${puppeteerResult.email} flagged as risky (${reason}) — saving with [unverified] note`);
+              console.log(`   [Puppeteer] ✅ ${companyName} → ${puppeteerResult.email}`);
+            } else {
+              console.log(`   [Puppeteer] ❌ ${puppeteerResult.email} failed verification (${reason}) — cascade exhausted`);
+            }
+          }
+        } else {
+          console.log(`   [Puppeteer] ℹ️  No email found — cascade exhausted for ${companyName}`);
+        }
+      } catch (err) {
+        console.log(`   [Puppeteer] ✗ Error for ${companyName}: ${err.message}`);
+      }
+    }
+
+    // Assign AB group once per company — all send_day records for the same contact
+    // must share the same group. Calling assignAbGroup inside the record loop would
+    // randomise independently per record, splitting BSI contacts across groups.
+    const companyAbGroup = (() => {
+      const firstRecord = records[0];
+      if (firstRecord?.fields['AB Test Group']) return firstRecord.fields['AB Test Group'];
+      const anyContact = broadcastContacts.find(c => c.email) || null;
+      if (!anyContact && !puppeteerContactInfo) return null;
+      return assignAbGroup(isBespoke, signalType);
+    })();
+
     // Build update for each record in this company group
     for (const record of records) {
       const rf       = record.fields;
       const sendDay  = rf['Send Day'] || 1;
-      // Try exact send_day match first, then fall back to any contact with a real email
+      // Try exact send_day match first, but only if that contact has a real email.
+      // If the send_day contact is LinkedIn-only (email = null), skip it and fall back
+      // to firstWithEmail — otherwise a LinkedIn-only contact silently blocks a real email.
       const firstWithEmail = broadcastContacts.find(c => c.email) || null;
-      const contact  = contactBySendDay.get(sendDay) || firstWithEmail || broadcastContacts[0] || null;
+      const byDay   = contactBySendDay.get(sendDay);
+      const contact = (byDay?.email ? byDay : null) || firstWithEmail || broadcastContacts[0] || null;
       const industry = apolloIndustry || rf['Industry'] || null;
 
       const fields = {};
@@ -304,22 +369,30 @@ async function run() {
         const linkedin = contact.linkedin_url || contact.linkedinUrl;
         if (linkedin) fields['LinkedIn URL'] = linkedin;
         console.log(`   ✓ Day ${contact.send_day || sendDay}: ${contact.name || ''} (${contact.title || ''}) → ${contact.email}`);
+      } else if (puppeteerContactInfo) {
+        // Puppeteer found an email — no name/title available, same format as pipeline
+        contactsFound++;
+        fields['Contact Info'] = puppeteerContactInfo;
+        const linkedin = contact?.linkedin_url || contact?.linkedinUrl;
+        if (linkedin) fields['LinkedIn URL'] = linkedin;
       } else {
         contactsNotFound++;
         fields['Contact Info'] = '⚠️ Research Needed';
         // Still write LinkedIn if contact has one but no email
         const linkedin = contact?.linkedin_url || contact?.linkedinUrl;
         if (linkedin) fields['LinkedIn URL'] = linkedin;
-        if (!contact?.email) console.log(`   ✗ No contact found → marked Research Needed`);
+        console.log(`   ✗ No contact found → marked Research Needed`);
       }
 
       // Industry — only fill if currently empty
       if (industry && !rf['Industry']) fields['Industry'] = industry;
 
-      // AB Test Group — only assign if contact found AND not already set
-      // No contact = no AB group yet; we assign when the contact is found
-      if (contact?.email && !rf['AB Test Group']) {
-        fields['AB Test Group'] = assignAbGroup(isBespoke, signalType);
+      // AB Test Group — only assign if a contact was found AND not already set.
+      // Must check both Apollo contact path AND Puppeteer path — in the Puppeteer
+      // case, contact?.email is falsy (that's why we fell through to Puppeteer),
+      // so we use puppeteerContactInfo as the signal that a contact was found.
+      if ((contact?.email || puppeteerContactInfo) && !rf['AB Test Group'] && companyAbGroup) {
+        fields['AB Test Group'] = companyAbGroup;
       }
 
       // Proof Clients — set based on effective industry
@@ -371,9 +444,13 @@ async function run() {
     console.log('  ⚠️  Ensure "Proof Clients" field exists in Airtable before running --live.');
   }
   console.log('════════════════════════════════════════════════════════════');
+
+  // Close the shared Puppeteer browser instance (no-op if it was never opened)
+  await closeBrowser();
 }
 
-run().catch(err => {
+run().catch(async err => {
   console.error('Fatal error:', err.message);
+  await closeBrowser();
   process.exit(1);
 });

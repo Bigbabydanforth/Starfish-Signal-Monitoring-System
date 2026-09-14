@@ -1,10 +1,9 @@
 // hubspot/generateClaudeEmails.js
 //
-// Generates 7 fully written outreach emails (or 6 for Website Visitor)
-// for contacts assigned to the Claude A/B test group.
+// Generates 10 fully written outreach emails for contacts assigned to the Claude A/B test group.
 //
 // Uses claude-sonnet-4-6 (NOT Haiku — quality matters for outreach emails).
-// All 7 emails are generated in a SINGLE Claude API call before HubSpot sees the contact.
+// All 10 emails are generated in a SINGLE Claude API call before HubSpot sees the contact.
 //
 // The assembled prompt has 3 parts (assembled in order):
 //   Part 1 — MASTER_PROMPT: Brand rules, voice, structure, output format (constant)
@@ -13,7 +12,7 @@
 //
 // ─── BRIEFS SOURCE ────────────────────────────────────────────────────────────
 // MASTER_PROMPT and SIGNAL_BLOCKS are populated from:
-//   "Starfish Signal Email Briefs — for Claude-Generated Sequences (v1)"
+//   "Starfish Signal Email Briefs — for Claude-Generated Sequences (v2)"
 // To update: replace MASTER_PROMPT with the new Section 1 text, and replace
 // each SIGNAL_BLOCKS[x] with the updated section text. Do not modify anything
 // else in this file when updating the brief content.
@@ -26,13 +25,13 @@ import { getProofClients } from '../data/proof_clients.js';
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 // ── PART 1: MASTER PROMPT ────────────────────────────────────────────────────
-// Section 1 from Starfish Signal Email Briefs v1 — pasted verbatim.
+// Section 1 from Starfish Signal Email Briefs v2 — pasted verbatim.
 // Contains: role, core idea, offer, structure, cadence, voice, tokens.
 // OUTPUT FORMAT section is overridden to JSON — the brief describes a labeled-text
 // format for human use, but this code requires JSON for parsing.
 //
 const MASTER_PROMPT = `
-Role. You are writing a cold outbound email sequence for Starfish, a Brand and Creative Intelligence™ agency. You are writing on behalf of the individual sender whose inbox the emails send from (their name and signature are added automatically — do not write a signature).
+Role. You are writing a cold outbound email sequence for Starfish, a Brand and Creative agency. You are writing on behalf of the individual sender whose inbox the emails send from (their name and signature are added automatically — do not write a signature).
 
 The core idea behind everything Starfish says. Every brand now lives in two worlds: the human world of the people who decide, and the AI world where tools like ChatGPT and Claude shape what those people see first. A brand can be strong in one and invisible in the other. Starfish closes that gap — brand soul and coherence that hold up for people and for the AI systems now standing between a brand and its buyers.
 
@@ -41,9 +40,9 @@ The offer (the single conversion goal). A free Brand Intelligence diagnostic: a 
 Inputs you will be given below. The signal type and its Signal Block, the prospect's first name, company, and title, the specific signal detail, and any company enrichment/research. Use the specifics — do not write generically when you have a detail you can point to.
 
 Structure and cadence (fixed unless the Signal Block overrides)
-- 7 touches. Business-day delays between them: 3, 5, 6, 6, 7, 8 (so Day 0, 3, 8, 14, 20, 27, 35).
-- Threading. Touch 1 opens a new thread and is the only one with a real subject line. Touches 2-7 are replies on that same thread, so their subject is just "Re:" the first — write bodies for them, not new subjects.
-- Meeting CTA on Touches 1, 4, and 6. Use a first-person link label such as "Grab 20 minutes with me" or "Grab time with me" as an HTML anchor tag pointing to {{ owner.meetings_link }}. Example: <a href="{{ owner.meetings_link }}">Grab 20 minutes with me</a>. The other touches end on a lighter question or the diagnostic offer, no hard booking ask.
+- 10 touches. Touches 1–7 keep the original cadence, business-day delays 3, 5, 6, 6, 7, 8 (Day 0, 3, 8, 14, 20, 27, 35). Touches 8–10 are quarterly reconnect touches, spaced 28 days apart (Day 63, 91, 119).
+- Threading. Every touch opens its own new thread and carries its own subject line — no replies, no "Re:" threads. Write a distinct subject for each of the 10 touches, following the subject-line rules below.
+- Meeting CTA on Touches 1, 4, and 6. Use a first-person link label such as "Grab 10 minutes with me" or "Grab time with me" as an HTML anchor tag pointing to {{owner.meetings_link}}. Example: <a href="{{owner.meetings_link}}">Grab 10 minutes with me</a>. The other touches end on a lighter question or the diagnostic offer, no hard booking ask.
 - The arc (write to this; vary the angle and wording each run):
   Touch 1 — Open on the signal itself. Name what's at stake because of it. Soft meeting CTA.
   Touch 2 — Sharpen the problem: the first impression often isn't the brand's to make anymore; AI forms its own read before a person arrives.
@@ -51,44 +50,54 @@ Structure and cadence (fixed unless the Signal Block overrides)
   Touch 4 — Credibility: McKinsey's research that brand coherence is now a structural advantage in the AI era, and it has to hold across both worlds. Meeting CTA.
   Touch 5 — Offer the free Brand Intelligence diagnostic as the low-friction first step. "Want one?"
   Touch 6 — The "two worlds, one brand" close. Meeting CTA.
-  Touch 7 — Breakup: leave the door open, restate the diagnostic as an easy first step. No pressure.
+  Touch 7 — Not the right time, for now: leave the door open, restate the diagnostic as an easy first step. No pressure, no explicit goodbye — just make it easy to say yes later.
+  Touch 8 — Day 63 reconnect: a light check-in on whether brand has become a priority since. Restate the diagnostic offer. Low pressure, explicitly no commitments.
+  Touch 9 — Day 91 reconnect: end-of-year framing (budget and planning season). Restate the diagnostic offer, same low-pressure, no-commitments tone.
+  Touch 10 — Day 119 reconnect: a direct, one-line check-in ("Is it time?"). Restate the diagnostic offer once more. Final touch of the sequence.
 
 Voice and style (fixed)
-- Warm, direct, first-person, concise. Each email is one idea and one ask, roughly 60-120 words.
+- Warm, direct, first-person, concise. Each email is one idea and one ask, roughly 60–120 words. Touches 8–10 (the quarterly reconnects) run shorter, roughly 40–70 words, since they're brief check-ins.
 - No em dashes. Use commas or periods.
-- Subject lines (Touch 1 only): short, plain, curiosity-driven. No colons, no emojis, no clickbait, no ALL CAPS.
+- Subject lines (every touch): short, plain, curiosity-driven. No colons, no emojis, no clickbait, no ALL CAPS.
 - Name Starfish once, where it lands naturally (often Touch 1). When you cite AI tools, name ChatGPT and Claude.
 - Lead with the prospect's situation, not with Starfish. Every email should feel like it was written after reading about them.
 
-Personalization tokens (write these literally, exactly as shown — spaces inside braces are required)
-- {{ contact.firstname }} — greeting. ALWAYS open each email body with "Hi {{ contact.firstname }}," on the first line. Never skip "Hi". Fallback: there.
-- {{ contact.company }} — the prospect's company. Fallback: your brand.
-- End every email body with "Best," on its own line. Do not write a name, token, or anything after it — the sender's signature is appended automatically by HubSpot. The last two characters of every email body must be "st," (i.e. ending with "Best,"). Example of correct closing:
-...your closing sentence here.
-
-Best,
-- For signal-specific values (acquired company name, sector, etc.) write the ACTUAL VALUE directly — do not use placeholder tokens.
+Personalization tokens (write these literally, exactly as shown)
+- {{contact.firstname}} — greeting. Fallback: there.
+- {{contact.company}} — the prospect's company. Fallback: your brand. For possessive, write {{contact.company}}'s (apostrophe-s outside the token, never inside the braces).
+- Sign off every email body with "Best," on its own line, then {{sender.firstname}} on the next line. Do not hardcode a person's name — use the token. The sender's full signature is appended automatically by HubSpot.
+- Any signal-specific tokens are listed in that Signal Block.
 
 OUTPUT FORMAT — CRITICAL:
 You must return ONLY valid JSON. No markdown fences. No preamble. No explanation after the JSON. Just the raw JSON object.
 
-The JSON must contain exactly these keys (for 7-touch signals):
+The JSON must contain exactly these keys:
 {
   "email_1_subject": "subject line for touch 1",
   "email_1_body": "full body text for touch 1",
+  "email_2_subject": "subject line for touch 2",
   "email_2_body": "full body text for touch 2",
+  "email_3_subject": "subject line for touch 3",
   "email_3_body": "full body text for touch 3",
+  "email_4_subject": "subject line for touch 4",
   "email_4_body": "full body text for touch 4",
+  "email_5_subject": "subject line for touch 5",
   "email_5_body": "full body text for touch 5",
+  "email_6_subject": "subject line for touch 6",
   "email_6_body": "full body text for touch 6",
-  "email_7_body": "full body text for touch 7"
+  "email_7_subject": "subject line for touch 7",
+  "email_7_body": "full body text for touch 7",
+  "email_8_subject": "subject line for touch 8",
+  "email_8_body": "full body text for touch 8",
+  "email_9_subject": "subject line for touch 9",
+  "email_9_body": "full body text for touch 9",
+  "email_10_subject": "subject line for touch 10",
+  "email_10_body": "full body text for touch 10"
 }
 
-For 6-touch signals (Website Visitor only), omit "email_7_body".
+Every touch opens its own new thread, so every touch has its own subject line.
 
-Only email_1_subject exists. Touches 2-7 are replies on the same thread so they do not get subject lines — only body text.
-
-Each email body must be plain text with one exception: meeting links must be written as HTML anchor tags, e.g. <a href="URL">Grab 20 minutes with me</a>. No other HTML. No markdown. Use line breaks for paragraph spacing. Do not include a signature — it is appended automatically.
+Each email body must be plain text with one exception: meeting links must be written as HTML anchor tags, e.g. <a href="{{owner.meetings_link}}">Grab 10 minutes with me</a>. No other HTML. No markdown. Use line breaks for paragraph spacing. Do not include a signature — it is appended automatically.
 `;
 
 // ── MASTER PROMPT TOKEN ESTIMATE ─────────────────────────────────────────────
@@ -106,7 +115,7 @@ Each email body must be plain text with one exception: meeting links must be wri
 
 // ── PART 2: SIGNAL BLOCKS ────────────────────────────────────────────────────
 // Each key maps a signal_type string to its Section 2 block from the briefs document
-// (Starfish Signal Email Briefs v1).
+// (Starfish Signal Email Briefs v2).
 // Rebrand routes to the News/Press block per Zack's confirmed decision.
 //
 const SIGNAL_BLOCKS = {
@@ -117,14 +126,17 @@ Trigger: a new senior marketing leader (e.g., CMO, VP/Head of Marketing) has jus
 
 The hook: they didn't build this brand, but they inherited it — and whatever is broken becomes theirs the moment they stop being "the new person," usually around the six-month mark, right when it's hardest to fix. This is the one window where a new leader can act before the brand's problems become their problems.
 
-Angle notes by touch:
+Angle notes by touch (guidance, not copy):
 T1 — congratulate the new role, frame the inherited-brand stakes.
 T2 — the fork every new leader faces (move fast and look rushed, or study it for a year and look idle) and why guessing whether it's a strategy or execution problem gets expensive.
-T3 — a buyer is asking an AI tool about {{ contact.company }} right now and getting an answer they didn't write and can't see.
+T3 — a buyer is asking an AI tool about {{contact.company}} right now and getting an answer they didn't write and can't see.
 T4 — McKinsey/coherence, framed as "an easy thing to get wrong in year one."
 T5 — the free diagnostic, "better to know now than hear it in a board meeting."
 T6 — two worlds, "the decision a new leader gets one shot to make well."
-T7 — breakup, "if brand strategy lands on your desk later this year, and for most new leaders it does..."
+T7 — not the right time for now, door open, "if brand strategy lands on your desk later this year, and for most new leaders it does..."
+T8 — Day 63 reconnect: has the brand emerged as this year's initiative, diagnostic restate, no commitments.
+T9 — Day 91 reconnect: end-of-year framing, diagnostic restate.
+T10 — Day 119 reconnect: direct "is it time" check-in, diagnostic restate, final touch.
 
 Tokens: standard only.
 `,
@@ -136,37 +148,43 @@ Trigger: the company made a notable announcement or issued a press release.
 
 The hook: a moment like this sends a wave of people, and AI tools, to look the company up at the same time — and what they find is the brand, not the press release. The spike only compounds if the brand underneath is clear; otherwise attention resets.
 
-Suggested Touch 1 subject: "Saw the {{ contact.company }} announcement" (or a close, specific variant).
+Suggested Touch 1 subject: "Saw the {{contact.company}} announcement" (or a close, specific variant).
 
 Angle notes by touch:
 T1 — nice announcement; the first look has to work in their favor.
-T2 — the news fades in a day or two; what lasts is how ChatGPT and Claude fold it into their standing summary of {{ contact.company }}.
+T2 — the news fades in a day or two; what lasts is how ChatGPT and Claude fold it into their standing summary of {{contact.company}}.
 T3 — what the LLMs actually did with the news; odds are their version isn't the one the company wrote.
 T4 — McKinsey/coherence: attention rewards coherence, and a news moment stress-tests it.
 T5 — the free diagnostic on how the moment is landing with people and AI.
 T6 — two worlds.
-T7 — breakup, "if you want the next announcement to compound instead of reset."
+T7 — not the right time for now, "if you want the next announcement to compound instead of reset."
+T8 — Day 63 reconnect: check whether the brand conversation the news sparked is still active, diagnostic restate.
+T9 — Day 91 reconnect: end-of-year framing, diagnostic restate.
+T10 — Day 119 reconnect: direct check-in, diagnostic restate, final touch.
 
 Tokens: standard only.
 `,
 
   'Rebrand': `
-2.2 — News / Press Release (Rebrand routes to this block per Zack's confirmed decision)
+2.7 — Rebrand
 
-Trigger: the company made a notable announcement, issued a press release, or completed a rebrand.
+Trigger: the company recently completed a rebrand — new name, new visual identity, new positioning, or a full brand overhaul.
 
-The hook: a moment like this sends a wave of people, and AI tools, to look the company up at the same time — and what they find is the brand, not the press release. The spike only compounds if the brand underneath is clear; otherwise attention resets.
+The hook: a rebrand only works if the world sees the same new brand everywhere at once. The day a new brand goes live, AI tools are still describing the old one — pulling cached summaries, old press, whatever they indexed before the change. The gap between how the company sees itself and how it is being described elsewhere closes slowly, and only if the new brand is clear and consistent enough to displace the old one.
 
-Suggested Touch 1 subject: "Saw the {{ contact.company }} announcement" (or a close, specific variant referencing the rebrand).
+Suggested Touch 1 subject: "Saw the {{contact.company}} rebrand" (or a specific, close variant referencing what changed — new name, new look, new positioning).
 
 Angle notes by touch:
-T1 — nice announcement; the first look has to work in their favor.
-T2 — the news fades in a day or two; what lasts is how ChatGPT and Claude fold it into their standing summary of {{ contact.company }}.
-T3 — what the LLMs actually did with the news; odds are their version isn't the one the company wrote.
-T4 — McKinsey/coherence: attention rewards coherence, and a news moment stress-tests it.
-T5 — the free diagnostic on how the moment is landing with people and AI.
-T6 — two worlds.
-T7 — breakup, "if you want the next announcement to compound instead of reset."
+T1 — nice rebrand; the launch is the visible part, what happens after is whether the new brand actually takes hold.
+T2 — AI tools have already formed a view of {{contact.company}} based on everything indexed before the change, and they do not automatically update when a logo or name does.
+T3 — what ChatGPT and Claude are actually saying about {{contact.company}} right now; odds are it is the old brand, not the new one. Link the article "Protecting Your Brand's Soul in the Age of AI."
+T4 — McKinsey/coherence: a rebrand that does not carry through to how AI represents the company is half a rebrand — the human world sees the new brand, the AI world still describes the old one, and that gap is a structural risk.
+T5 — the free Brand Intelligence diagnostic: see exactly how the new brand is reading to people and to the major AI tools today.
+T6 — two worlds, one brand; the rebrand is only finished when both worlds are telling the same story. Meeting CTA.
+T7 — not the right time for now, "if the rebrand conversation picks back up as you move through rollout."
+T8 — Day 63 reconnect: check whether the new brand has had time to settle, diagnostic restate, no commitments.
+T9 — Day 91 reconnect: end-of-year framing, "a good time to see how the rebrand has landed," diagnostic restate.
+T10 — Day 119 reconnect: direct check-in, diagnostic restate, final touch.
 
 Tokens: standard only.
 `,
@@ -178,18 +196,21 @@ Trigger: the company recently completed an acquisition (as acquirer or target).
 
 The hook: integration plans usually miss brand coherence. The longer two brand stories run in parallel, the more sales teams pick sides, customers notice the discrepancies, and AI tools settle on their own version of how the two companies relate — before anyone internally has agreed on the narrative.
 
-The acquired company name is provided in the PROSPECT DATA below. Use the actual acquired company name directly in the emails — write it out, do not use any placeholder.
+Signal-specific token: {{TargetCo}} = the acquired company. It appears in the Touch 1 subject and recurs in the body. Fallback: the acquired company.
 
-Suggested Touch 1 subject: "Congrats on the [acquired company name] acquisition" — use the real name from PROSPECT DATA.
+Suggested Touch 1 subject: "Congrats on the {{TargetCo}} acquisition".
 
 Angle notes by touch:
 T1 — now that the deal is done, contain the brand-coherence gap before it hits a board deck.
-T2 — the longer architecture stays unresolved, the more others define it (reps improvise, customers assume, and ChatGPT/Claude already summarize {{ contact.company }} and the acquired company for prospects).
+T2 — the longer architecture stays unresolved, the more others define it (reps improvise, customers assume, and ChatGPT/Claude already summarize {{contact.company}} and {{TargetCo}} for prospects).
 T3 — search and AI have already formed a view of how the two relate and aren't waiting for the integration timeline.
 T4 — McKinsey: brand incoherence is a structural risk, on two fronts (how people experience the combined brand, how AI represents it).
-T5 — free diagnostic comparing how {{ contact.company }} and the acquired company show up today.
+T5 — free diagnostic comparing how {{contact.company}} and {{TargetCo}} show up today.
 T6 — two worlds.
-T7 — breakup, "if brand architecture becomes a live decision as integration moves forward."
+T7 — not the right time for now, "if brand architecture becomes a live decision as integration moves forward."
+T8 — Day 63 reconnect: check whether brand architecture between {{contact.company}} and {{TargetCo}} has settled, diagnostic restate.
+T9 — Day 91 reconnect: end-of-year framing, diagnostic restate.
+T10 — Day 119 reconnect: direct check-in, diagnostic restate, final touch.
 `,
 
   'Funding': `
@@ -199,16 +220,19 @@ Trigger: the company recently closed a funding round, with budget likely earmark
 
 The hook: new capital, same old brand. Most companies spend a raise on hiring and product, and a year later the brand looks identical — while budget earmarked for brand has a short shelf life before it gets pulled to whatever's urgent that quarter.
 
-The prospect's industry/sector is provided in the PROSPECT DATA below. Write the actual industry name directly in the emails — do not use any placeholder.
+Signal-specific token: {{Sector}} = the prospect's industry/category (maps to the Industry field). Used in the body of Touches 2–3. Fallback: your category.
 
 Angle notes by touch:
 T1 — congrats on the raise; keep the brand in step with the capital.
-T2 — investors track burn, hiring, pipeline, rarely brand, and meanwhile ChatGPT and Claude summarizing the sector are forming a view of who's actually moving.
+T2 — investors track burn, hiring, pipeline, rarely brand, and meanwhile ChatGPT and Claude summarizing {{Sector}} are forming a view of who's actually moving.
 T3 — earmarked brand budget quietly becomes next quarter's hiring plan; the earlier they shape the AI read, the less it costs to change later.
 T4 — McKinsey: funded companies that get coherence right compound the advantage; the ones that don't spend the next round catching up.
 T5 — free diagnostic before the budget goes elsewhere.
 T6 — two worlds, "make sure the budget builds for both."
-T7 — breakup, "if the brand budget is still looking for a home."
+T7 — not the right time for now, "if the brand budget is still looking for a home."
+T8 — Day 63 reconnect: check whether the brand budget found a home, diagnostic restate.
+T9 — Day 91 reconnect: end-of-year / next-round planning framing, diagnostic restate.
+T10 — Day 119 reconnect: direct check-in, diagnostic restate, final touch.
 `,
 
   'Website Visitor': `
@@ -216,13 +240,15 @@ T7 — breakup, "if the brand budget is still looking for a home."
 
 Trigger: an identified visit to starfishco.com with no form fill.
 
-IMPORTANT: Do not mention the website visit. Write to the need the visit implies — the quiet sense that the brand isn't landing the way it used to. Referencing the visit is off-limits.
+Important: do not mention the website visit. Write to the need the visit implies — the quiet sense that the brand isn't landing the way it used to. Referencing the visit is off-limits.
 
-Cadence override: this is a compressed, 6-touch sequence. Business-day delays 2, 3, 3, 4, 4 (Day 0, 2, 5, 8, 12, 16). Meeting CTA on Touches 1, 3, and 5. Collapse the 7-touch arc into six: T1 open on the feeling, T2 the AI half of it, T3 McKinsey/coherence + CTA, T4 the free diagnostic, T5 two worlds + CTA, T6 breakup.
+Cadence override: this is a compressed, 9-touch sequence. Business-day delays 2, 3, 3, 4, 4 (Day 0, 2, 5, 8, 12, 16) for Touches 1–6, then three quarterly reconnect touches 28 days apart (Day 44, 72, 100) for Touches 7–9. Meeting CTA on Touches 1, 3, and 5. Collapse the 10-touch arc into nine: T1 open on the feeling, T2 the AI half of it, T3 McKinsey/coherence + CTA, T4 the free diagnostic, T5 two worlds + CTA, T6 not the right time for now (door open, no pressure), T7 Day 44 reconnect (light check-in, diagnostic restate, no commitments), T8 Day 72 reconnect (end-of-year/planning framing, diagnostic restate), T9 Day 100 reconnect (direct check-in, diagnostic restate, final touch).
 
-The hook: most rebrands start with a quiet feeling that {{ contact.company }} isn't landing the way it used to, even when nothing is obviously broken — and that feeling is usually right, and usually early. The teams that act while it's still a feeling don't have to scramble later.
+The hook: most rebrands start with a quiet feeling that {{contact.company}} isn't landing the way it used to, even when nothing is obviously broken — and that feeling is usually right, and usually early. The teams that act while it's still a feeling don't have to scramble later.
 
 Tokens: standard only.
+
+OUTPUT FOR THIS SIGNAL TYPE: Provide keys email_1 through email_9 only — omit email_10_subject and email_10_body.
 
 CRITICAL: Do NOT mention website visits, monitoring, tracking, research signals, intent data, or digital footprints in any email. Write as if you are proactively reaching out based on your knowledge of the industry — nothing more.
 `,
@@ -243,7 +269,10 @@ T3 — what a strong brand looks like today (people and AI describe it the same 
 T4 — the diagnostic framed as "rather than keep making the case, I'd rather show you."
 T5 — before the next brand/positioning decision, see the human and AI picture side by side.
 T6 — two worlds, one brand.
-T7 — breakup, door open, diagnostic as the easy first step.
+T7 — not the right time for now, door open, diagnostic as the easy first step.
+T8 — Day 63 reconnect: check whether the brand/positioning decision is now live, diagnostic restate.
+T9 — Day 91 reconnect: end-of-year / next-year planning framing, diagnostic restate.
+T10 — Day 119 reconnect: direct check-in, diagnostic restate, final touch.
 `
 };
 
@@ -334,19 +363,19 @@ Signal context: ${signalDetail}
 Starfish proof clients in ${industry}: ${proofClients}
 `;
 
-  // M&A: add TargetCo
+  // M&A: define TargetCo token value
   if (isMandA) {
     const targetCo = signal.deal?.seller || signal.acquired_company || null;
     prospectData += `
 M&A deal detail: ${companyName} ${signal.deal?.type || 'acquired'} ${targetCo || 'another company'}.
-Acquired company name: ${targetCo || 'the acquired company'} — use this name directly in the emails.
+{{TargetCo}} = ${targetCo || 'the acquired company'} — use the {{TargetCo}} token wherever the acquired company name appears.
 `;
   }
 
-  // Funding: add Sector
+  // Funding: define Sector token value
   if (isFunding) {
     prospectData += `
-Sector/Industry: ${industry} — use this name directly in the emails.
+{{Sector}} = ${industry} — use the {{Sector}} token wherever the sector/industry appears.
 `;
   }
 
@@ -377,24 +406,26 @@ reaching out based on your knowledge of the industry — nothing more.
  * @returns {Promise<{
  *   success: boolean,
  *   emails?: {
- *     email_1_subject: string,
- *     email_1_body: string,
- *     email_2_body: string,
- *     email_3_body: string,
- *     email_4_body: string,
- *     email_5_body: string,
- *     email_6_body: string,
- *     email_7_body?: string   ← undefined for Website Visitor
+ *     email_1_subject: string,  email_1_body: string,
+ *     email_2_subject: string,  email_2_body: string,
+ *     email_3_subject: string,  email_3_body: string,
+ *     email_4_subject: string,  email_4_body: string,
+ *     email_5_subject: string,  email_5_body: string,
+ *     email_6_subject: string,  email_6_body: string,
+ *     email_7_subject: string,  email_7_body: string,
+ *     email_8_subject: string,  email_8_body: string,
+ *     email_9_subject: string,  email_9_body: string,
+ *     email_10_subject: string, email_10_body: string,
  *   },
- *   touchCount?: number,      ← 6 or 7
+ *   touchCount?: number,
  *   error?: string
  * }>}
  */
 async function generateClaudeEmails(signal, contact) {
-  const signalType      = signal.type || signal.signal_type || '';
-  const companyName     = signal.company_name || signal.company?.name || 'Unknown Company';
+  const signalType       = signal.type || signal.signal_type || '';
+  const companyName      = signal.company_name || signal.company?.name || 'Unknown Company';
   const isWebsiteVisitor = ['Website Visitor', 'website_visitor'].includes(signalType);
-  const touchCount      = isWebsiteVisitor ? 6 : 7;
+  const touchCount       = isWebsiteVisitor ? 9 : 10;
 
   console.log(`[Email Gen] Starting generation for: ${companyName} — ${signalType} (${touchCount} touches)`);
 
@@ -435,7 +466,7 @@ async function generateClaudeEmails(signal, contact) {
   try {
     const response = await anthropic.messages.create({
       model:      'claude-sonnet-4-6',
-      max_tokens: 4000,
+      max_tokens: 6000,
       system: [
         {
           type:          'text',
@@ -523,12 +554,32 @@ async function generateClaudeEmails(signal, contact) {
     return { success: false, error: 'Failed to parse Claude JSON response', rawText };
   }
 
-  // Validate required keys exist in the parsed response
-  const required7 = ['email_1_subject', 'email_1_body', 'email_2_body', 'email_3_body',
-                      'email_4_body',   'email_5_body', 'email_6_body', 'email_7_body'];
-  const required6 = ['email_1_subject', 'email_1_body', 'email_2_body', 'email_3_body',
-                      'email_4_body',   'email_5_body', 'email_6_body'];
-  const requiredKeys = isWebsiteVisitor ? required6 : required7;
+  // Validate required keys exist in the parsed response.
+  // Website Visitor uses a 9-touch sequence — email_10 is intentionally absent.
+  const required10 = [
+    'email_1_subject',  'email_1_body',
+    'email_2_subject',  'email_2_body',
+    'email_3_subject',  'email_3_body',
+    'email_4_subject',  'email_4_body',
+    'email_5_subject',  'email_5_body',
+    'email_6_subject',  'email_6_body',
+    'email_7_subject',  'email_7_body',
+    'email_8_subject',  'email_8_body',
+    'email_9_subject',  'email_9_body',
+    'email_10_subject', 'email_10_body',
+  ];
+  const required9 = [
+    'email_1_subject',  'email_1_body',
+    'email_2_subject',  'email_2_body',
+    'email_3_subject',  'email_3_body',
+    'email_4_subject',  'email_4_body',
+    'email_5_subject',  'email_5_body',
+    'email_6_subject',  'email_6_body',
+    'email_7_subject',  'email_7_body',
+    'email_8_subject',  'email_8_body',
+    'email_9_subject',  'email_9_body',
+  ];
+  const requiredKeys = isWebsiteVisitor ? required9 : required10;
 
   const missingKeys = requiredKeys.filter(k => !emails[k] || typeof emails[k] !== 'string' || emails[k].trim() === '');
   if (missingKeys.length > 0) {
@@ -540,16 +591,11 @@ async function generateClaudeEmails(signal, contact) {
   // Subject lines can be legitimately short — 5 char minimum.
   // Body content should be at least 30 chars.
   for (const key of requiredKeys) {
-    const minLen = key === 'email_1_subject' ? 5 : 30;
+    const minLen = key.endsWith('_subject') ? 5 : 30;
     if (emails[key].trim().length < minLen) {
       console.log(`[Email Gen] ✗ ${key} is suspiciously short (${emails[key].trim().length} chars) — possible generation error`);
       return { success: false, error: `${key} content too short — likely a generation error` };
     }
-  }
-
-  // Strip email_7_body from Website Visitor responses (in case Claude included it anyway)
-  if (isWebsiteVisitor && emails.email_7_body) {
-    delete emails.email_7_body;
   }
 
   console.log(`[Email Gen] ✓ Generated ${touchCount} emails for ${signal.company_name || signal.company?.name}`);

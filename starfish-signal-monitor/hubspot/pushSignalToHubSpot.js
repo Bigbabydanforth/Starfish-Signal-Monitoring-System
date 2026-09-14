@@ -20,7 +20,7 @@
  *   Contact props:  bespoke, bespoke_reason, linkedinbio
  *   M&A props:      acquired_company, acquired_company_industry
  *   A/B props:      ab_test_group, claude_generated, claude_generated_at
- *   Email props:    email_1_subject, email_1_body through email_7_body (13 total)
+ *   Email props:    email_1_subject through email_10_subject, email_1_body through email_10_body (20 total)
  *
  * ENV VARS REQUIRED:
  *   HUBSPOT_PRIVATE_APP_TOKEN
@@ -85,14 +85,16 @@ const SIGNAL_TYPE_SOURCE_MAP = {
 // Replaces all HubSpot/Claude tokens in a generated email string with real values.
 // HubSpot does NOT perform a second-pass substitution inside contact property values,
 // so we pre-fill everything before saving — the stored email is already fully written.
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink }) {
+function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,    contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,      contactCompany   || 'your company')
     .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     senderFirstName  || '')
-    .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '');
+    .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
+    .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
+    .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
 }
 
 // ── A/B group assignment ──────────────────────────────────────────────────────
@@ -271,15 +273,39 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
 
     if (preGenerated) {
       console.log(`  [HubSpot Push] Using pre-generated Claude emails from Airtable`);
+      // Safety-net substitution — Airtable emails may still contain {{ }} tokens if they were
+      // generated before substitution was applied. Run substituteTokens on every field so nothing
+      // slips through to HubSpot as a raw template token.
+      const tokenVars = {
+        contactFirstName: firstname,
+        contactCompany:   companyName,
+        senderFirstName:  senderConfig.firstName,
+        meetingLink:      senderConfig.meetingLink,
+        targetCo:         signal.acquired_company || signal.deal?.seller || null,
+        sector:           industry,
+      };
+      const sub = (t) => substituteTokens(t, tokenVars);
       claudeEmails = {
-        email_1_subject: signal.email_1_subject,
-        email_1_body:    signal.email_1_body,
-        email_2_body:    signal.email_2_body    || null,
-        email_3_body:    signal.email_3_body    || null,
-        email_4_body:    signal.email_4_body    || null,
-        email_5_body:    signal.email_5_body    || null,
-        email_6_body:    signal.email_6_body    || null,
-        ...(signal.email_7_body ? { email_7_body: signal.email_7_body } : {}),
+        email_1_subject:  sub(signal.email_1_subject)  || null,
+        email_1_body:     sub(signal.email_1_body)     || null,
+        email_2_subject:  sub(signal.email_2_subject)  || null,
+        email_2_body:     sub(signal.email_2_body)     || null,
+        email_3_subject:  sub(signal.email_3_subject)  || null,
+        email_3_body:     sub(signal.email_3_body)     || null,
+        email_4_subject:  sub(signal.email_4_subject)  || null,
+        email_4_body:     sub(signal.email_4_body)     || null,
+        email_5_subject:  sub(signal.email_5_subject)  || null,
+        email_5_body:     sub(signal.email_5_body)     || null,
+        email_6_subject:  sub(signal.email_6_subject)  || null,
+        email_6_body:     sub(signal.email_6_body)     || null,
+        email_7_subject:  sub(signal.email_7_subject)  || null,
+        email_7_body:     sub(signal.email_7_body)     || null,
+        email_8_subject:  sub(signal.email_8_subject)  || null,
+        email_8_body:     sub(signal.email_8_body)     || null,
+        email_9_subject:  sub(signal.email_9_subject)  || null,
+        email_9_body:     sub(signal.email_9_body)     || null,
+        email_10_subject: sub(signal.email_10_subject) || null,
+        email_10_body:    sub(signal.email_10_body)    || null,
       };
     } else {
       const emailResult = await generateClaudeEmails(signal, contact);
@@ -291,17 +317,32 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
           contactCompany:   companyName,
           senderFirstName:  senderConfig.firstName,
           meetingLink:      senderConfig.meetingLink,
+          targetCo:         signal.acquired_company || signal.deal?.seller || null,
+          sector:           industry,
         };
         const emails = emailResult.emails;
         claudeEmails = {
-          email_1_subject: substituteTokens(emails.email_1_subject, tokenVars),
-          email_1_body:    substituteTokens(emails.email_1_body,    tokenVars),
-          email_2_body:    substituteTokens(emails.email_2_body,    tokenVars),
-          email_3_body:    substituteTokens(emails.email_3_body,    tokenVars),
-          email_4_body:    substituteTokens(emails.email_4_body,    tokenVars),
-          email_5_body:    substituteTokens(emails.email_5_body,    tokenVars),
-          email_6_body:    substituteTokens(emails.email_6_body,    tokenVars),
-          ...(emails.email_7_body ? { email_7_body: substituteTokens(emails.email_7_body, tokenVars) } : {}),
+          email_1_subject:  substituteTokens(emails.email_1_subject,  tokenVars) || null,
+          email_1_body:     substituteTokens(emails.email_1_body,     tokenVars) || null,
+          email_2_subject:  substituteTokens(emails.email_2_subject,  tokenVars) || null,
+          email_2_body:     substituteTokens(emails.email_2_body,     tokenVars) || null,
+          email_3_subject:  substituteTokens(emails.email_3_subject,  tokenVars) || null,
+          email_3_body:     substituteTokens(emails.email_3_body,     tokenVars) || null,
+          email_4_subject:  substituteTokens(emails.email_4_subject,  tokenVars) || null,
+          email_4_body:     substituteTokens(emails.email_4_body,     tokenVars) || null,
+          email_5_subject:  substituteTokens(emails.email_5_subject,  tokenVars) || null,
+          email_5_body:     substituteTokens(emails.email_5_body,     tokenVars) || null,
+          email_6_subject:  substituteTokens(emails.email_6_subject,  tokenVars) || null,
+          email_6_body:     substituteTokens(emails.email_6_body,     tokenVars) || null,
+          email_7_subject:  substituteTokens(emails.email_7_subject,  tokenVars) || null,
+          email_7_body:     substituteTokens(emails.email_7_body,     tokenVars) || null,
+          email_8_subject:  substituteTokens(emails.email_8_subject,  tokenVars) || null,
+          email_8_body:     substituteTokens(emails.email_8_body,     tokenVars) || null,
+          email_9_subject:  substituteTokens(emails.email_9_subject,  tokenVars) || null,
+          email_9_body:     substituteTokens(emails.email_9_body,     tokenVars) || null,
+          // Website Visitor uses 9 emails — email_10 is intentionally null for that type
+          email_10_subject: substituteTokens(emails.email_10_subject, tokenVars) || null,
+          email_10_body:    substituteTokens(emails.email_10_body,    tokenVars) || null,
         };
         const cs        = emailResult.cacheStats || {};
         const cacheNote = cs.cacheRead  > 0
@@ -362,12 +403,24 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
     ...(claudeEmails ? {
       email_1_subject:     claudeEmails.email_1_subject,
       email_1_body:        claudeEmails.email_1_body,
+      email_2_subject:     claudeEmails.email_2_subject,
       email_2_body:        claudeEmails.email_2_body,
+      email_3_subject:     claudeEmails.email_3_subject,
       email_3_body:        claudeEmails.email_3_body,
+      email_4_subject:     claudeEmails.email_4_subject,
       email_4_body:        claudeEmails.email_4_body,
+      email_5_subject:     claudeEmails.email_5_subject,
       email_5_body:        claudeEmails.email_5_body,
+      email_6_subject:     claudeEmails.email_6_subject,
       email_6_body:        claudeEmails.email_6_body,
-      ...(claudeEmails.email_7_body ? { email_7_body: claudeEmails.email_7_body } : {}),
+      email_7_subject:     claudeEmails.email_7_subject,
+      email_7_body:        claudeEmails.email_7_body,
+      email_8_subject:     claudeEmails.email_8_subject,
+      email_8_body:        claudeEmails.email_8_body,
+      email_9_subject:     claudeEmails.email_9_subject,
+      email_9_body:        claudeEmails.email_9_body,
+      email_10_subject:    claudeEmails.email_10_subject,
+      email_10_body:       claudeEmails.email_10_body,
       claude_generated:    'true',
       claude_generated_at: new Date().toISOString(),
     } : {}),
@@ -443,14 +496,29 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
             'Claude Generated':    true,
             'Claude Generated At': new Date().toISOString(),
             'AB Test Group':       'claude',
-            'Email 1 Subject':     claudeEmails.email_1_subject || null,
-            'Email 1 Body':        claudeEmails.email_1_body    || null,
-            'Email 2 Body':        claudeEmails.email_2_body    || null,
-            'Email 3 Body':        claudeEmails.email_3_body    || null,
-            'Email 4 Body':        claudeEmails.email_4_body    || null,
-            'Email 5 Body':        claudeEmails.email_5_body    || null,
-            'Email 6 Body':        claudeEmails.email_6_body    || null,
-            'Email 7 Body':        claudeEmails.email_7_body    || null,
+            'Email 1 Subject':     claudeEmails.email_1_subject  || null,
+            'Email 1 Body':        claudeEmails.email_1_body     || null,
+            'Email 2 Subject':     claudeEmails.email_2_subject  || null,
+            'Email 2 Body':        claudeEmails.email_2_body     || null,
+            'Email 3 Subject':     claudeEmails.email_3_subject  || null,
+            'Email 3 Body':        claudeEmails.email_3_body     || null,
+            'Email 4 Subject':     claudeEmails.email_4_subject  || null,
+            'Email 4 Body':        claudeEmails.email_4_body     || null,
+            'Email 5 Subject':     claudeEmails.email_5_subject  || null,
+            'Email 5 Body':        claudeEmails.email_5_body     || null,
+            'Email 6 Subject':     claudeEmails.email_6_subject  || null,
+            'Email 6 Body':        claudeEmails.email_6_body     || null,
+            'Email 7 Subject':     claudeEmails.email_7_subject  || null,
+            'Email 7 Body':        claudeEmails.email_7_body     || null,
+            'Email 8 Subject':     claudeEmails.email_8_subject  || null,
+            'Email 8 Body':        claudeEmails.email_8_body     || null,
+            'Email 9 Subject':     claudeEmails.email_9_subject  || null,
+            'Email 9 Body':        claudeEmails.email_9_body     || null,
+            // Website Visitor uses 9 emails — omit Email 10 fields to avoid writing null over any existing value
+            ...(signalType !== 'Website Visitor' ? {
+              'Email 10 Subject': claudeEmails.email_10_subject || null,
+              'Email 10 Body':    claudeEmails.email_10_body    || null,
+            } : {}),
           },
         }]);
         console.log(`  [HubSpot Push] ✓ Airtable record ${airtableRecordId} updated with Claude emails`);

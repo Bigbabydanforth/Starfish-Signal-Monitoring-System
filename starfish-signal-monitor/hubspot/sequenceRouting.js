@@ -15,15 +15,16 @@
  *   Does NOT throw — missing IDs produce warnings, not crashes.
  *   Called once at pipeline startup (execution/main.js).
  *
- * SENDER ROUTING (confirmed by Zack, updated 2026-07-22):
- *   David  → Job Change, M&A Activity, Funding
- *   Zack   → Website Visitor
- *   Cole + Andrew (50/50 alternating) → News/Press, Rebrand, Brand Strategy Intent
+ * SENDER ROUTING (confirmed by Zack, updated 2026-09-02):
+ *   David    → Job Change, M&A Activity, Funding
+ *   Zack     → Website Visitor
+ *   Zack     → Rebrand (zack@starfishco.com — BCI domain not yet available)
+ *   Cole + Andrew (50/50 alternating) → News/Press, Brand Strategy Intent
  *
  * SEQUENCE IDs:
  *   Starfish sequences — confirmed by Zack, all IDs live.
  *   Claude sequences   — shell sequences built in HubSpot; IDs in .env.
- *   Rebrand            — routes to News/Press sequences (same content, different trigger).
+ *   Rebrand            — own dedicated sequences (HS_SEQ_REBRAND_STARFISH / CLAUDE).
  */
 
 import 'dotenv/config';
@@ -39,6 +40,10 @@ export const SENDER_CONFIGS = {
   'zack@starfishco.com': {
     firstName:   'Zack',
     meetingLink: 'https://meetings.hubspot.com/zack-kessler/starfish-20-minute-intro-zack?uuid=f8b5da07-35e3-49b2-aeb8-b8a8d353d375',
+  },
+  'zack@starfishbci.com': {
+    firstName:   'Zack',
+    meetingLink: process.env.ZACK_BCI_MEETING_LINK || 'https://meetings.hubspot.com/zack-kessler/starfish-20-minute-intro-zack?uuid=f8b5da07-35e3-49b2-aeb8-b8a8d353d375',
   },
   'andrew@starfishco.com': {
     firstName:   'Andrew',
@@ -82,7 +87,7 @@ function getColeAndrewSender() {
 }
 
 // ── Routing table ─────────────────────────────────────────────────────────────
-// NOTE: News/Press, Rebrand, and BSI use getColeAndrewSender() — this function
+// NOTE: News/Press and BSI use getColeAndrewSender() — this function
 // is called at route-lookup time (not at module load), so the alternation is
 // correct across signals in a single run.
 const STATIC_ROUTING = {
@@ -110,13 +115,18 @@ const STATIC_ROUTING = {
     starfish:   process.env.HS_SEQ_WEBSITE_STARFISH || null,
     claude:     process.env.HS_SEQ_WEBSITE_CLAUDE   || null,
   },
+  'Rebrand': {
+    ownerEmail: process.env.ZACK_SENDER_EMAIL      || 'zack@starfishco.com',
+    ownerId:    process.env.ZACK_HUBSPOT_OWNER_ID  || null,
+    starfish:   process.env.HS_SEQ_REBRAND_STARFISH || null,
+    claude:     process.env.HS_SEQ_REBRAND_CLAUDE   || null,
+  },
 };
 
 // Signal types that use the Cole/Andrew 50/50 split — resolved dynamically at lookup time
-const COLE_ANDREW_SIGNAL_TYPES = new Set(['News/Press', 'Rebrand', 'Brand Strategy Intent']);
+const COLE_ANDREW_SIGNAL_TYPES = new Set(['News/Press', 'Brand Strategy Intent']);
 const COLE_ANDREW_SEQ = {
   'News/Press':           { starfish: process.env.HS_SEQ_NEWS_STARFISH,    claude: process.env.HS_SEQ_NEWS_CLAUDE    },
-  'Rebrand':              { starfish: process.env.HS_SEQ_NEWS_STARFISH,    claude: process.env.HS_SEQ_NEWS_CLAUDE    },
   'Brand Strategy Intent':{ starfish: process.env.HS_SEQ_BSI_STARFISH,     claude: process.env.HS_SEQ_BSI_CLAUDE     },
 };
 

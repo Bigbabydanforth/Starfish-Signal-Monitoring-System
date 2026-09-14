@@ -7,7 +7,7 @@
  *   - Today's run: 400 total — 200 starfish group, 200 claude group
  *   - Every contact pushed must have: email, company, industry, proof clients, send day
  *   - M&A signals must also have: Acquired Company + Acquired Company Industry
- *   - Claude group: must have Claude Generated = true AND all 7 email bodies
+ *   - Claude group: must have Claude Generated = true AND all 10 email bodies (9 for Website Visitor)
  *   - Starfish group: emails NOT sent to HubSpot (uses pre-built HubSpot sequences)
  *   - No duplicate contacts: one push per unique email address
  *   - No already-pushed signals: HubSpot Pushed = TRUE records are skipped
@@ -97,15 +97,25 @@ function skipReason(f, abGroup) {
   }
 
   // Claude group must have emails generated.
-  // Website Visitor uses a 6-touch sequence — Email 7 Body is intentionally absent for that type.
+  // Website Visitor uses a 9-touch sequence — Email 10 Subject/Body are intentionally absent.
   if (abGroup === 'claude') {
     if (f['Claude Generated'] !== true)                      return 'claude group: emails not generated';
     if (!f['Email 1 Subject']?.trim())                       return 'claude group: missing Email 1 Subject';
     const isWebsiteVisitor = f['Signal Type'] === 'Website Visitor';
-    const bodies = isWebsiteVisitor
-      ? ['Email 1 Body','Email 2 Body','Email 3 Body','Email 4 Body','Email 5 Body','Email 6 Body']
-      : ['Email 1 Body','Email 2 Body','Email 3 Body','Email 4 Body','Email 5 Body','Email 6 Body','Email 7 Body'];
-    const missing = bodies.filter(b => !f[b]?.trim());
+    const requiredFields = isWebsiteVisitor ? [
+      'Email 1 Body',  'Email 2 Subject',  'Email 2 Body',
+      'Email 3 Subject',  'Email 3 Body',  'Email 4 Subject',  'Email 4 Body',
+      'Email 5 Subject',  'Email 5 Body',  'Email 6 Subject',  'Email 6 Body',
+      'Email 7 Subject',  'Email 7 Body',  'Email 8 Subject',  'Email 8 Body',
+      'Email 9 Subject',  'Email 9 Body',
+    ] : [
+      'Email 1 Body',  'Email 2 Subject',  'Email 2 Body',
+      'Email 3 Subject',  'Email 3 Body',  'Email 4 Subject',  'Email 4 Body',
+      'Email 5 Subject',  'Email 5 Body',  'Email 6 Subject',  'Email 6 Body',
+      'Email 7 Subject',  'Email 7 Body',  'Email 8 Subject',  'Email 8 Body',
+      'Email 9 Subject',  'Email 9 Body',  'Email 10 Subject', 'Email 10 Body',
+    ];
+    const missing = requiredFields.filter(b => !f[b]?.trim());
     if (missing.length > 0)                                  return `claude group: missing ${missing.join(', ')}`;
   }
 
@@ -154,9 +164,17 @@ async function run() {
           'Company Website', 'Industry', 'Priority', 'Brief', 'Source URL',
           'Send Day', 'AB Test Group', 'Email Source', 'Bespoke', 'Bespoke Reason',
           'Acquired Company', 'Acquired Company Industry',
-          'Claude Generated', 'Email 1 Subject',
-          'Email 1 Body', 'Email 2 Body', 'Email 3 Body', 'Email 4 Body',
-          'Email 5 Body', 'Email 6 Body', 'Email 7 Body',
+          'Claude Generated',
+          'Email 1 Subject', 'Email 1 Body',
+          'Email 2 Subject', 'Email 2 Body',
+          'Email 3 Subject', 'Email 3 Body',
+          'Email 4 Subject', 'Email 4 Body',
+          'Email 5 Subject', 'Email 5 Body',
+          'Email 6 Subject', 'Email 6 Body',
+          'Email 7 Subject', 'Email 7 Body',
+          'Email 8 Subject', 'Email 8 Body',
+          'Email 9 Subject', 'Email 9 Body',
+          'Email 10 Subject', 'Email 10 Body',
           'Proof Clients',
         ],
         sort: [{ field: 'Date Detected', direction: 'asc' }],
@@ -320,14 +338,26 @@ async function run() {
       // Claude email fields — only used when abGroup = 'claude'
       // pushSignalToHubSpot will use these directly instead of calling Claude again
       // IF contact.abGroup is already set to 'claude' and emails are pre-generated
-      email_1_subject: abGroup === 'claude' ? (f['Email 1 Subject'] || null) : null,
-      email_1_body:    abGroup === 'claude' ? (f['Email 1 Body']    || null) : null,
-      email_2_body:    abGroup === 'claude' ? (f['Email 2 Body']    || null) : null,
-      email_3_body:    abGroup === 'claude' ? (f['Email 3 Body']    || null) : null,
-      email_4_body:    abGroup === 'claude' ? (f['Email 4 Body']    || null) : null,
-      email_5_body:    abGroup === 'claude' ? (f['Email 5 Body']    || null) : null,
-      email_6_body:    abGroup === 'claude' ? (f['Email 6 Body']    || null) : null,
-      email_7_body:    abGroup === 'claude' ? (f['Email 7 Body']    || null) : null,
+      email_1_subject:  abGroup === 'claude' ? (f['Email 1 Subject']  || null) : null,
+      email_1_body:     abGroup === 'claude' ? (f['Email 1 Body']     || null) : null,
+      email_2_subject:  abGroup === 'claude' ? (f['Email 2 Subject']  || null) : null,
+      email_2_body:     abGroup === 'claude' ? (f['Email 2 Body']     || null) : null,
+      email_3_subject:  abGroup === 'claude' ? (f['Email 3 Subject']  || null) : null,
+      email_3_body:     abGroup === 'claude' ? (f['Email 3 Body']     || null) : null,
+      email_4_subject:  abGroup === 'claude' ? (f['Email 4 Subject']  || null) : null,
+      email_4_body:     abGroup === 'claude' ? (f['Email 4 Body']     || null) : null,
+      email_5_subject:  abGroup === 'claude' ? (f['Email 5 Subject']  || null) : null,
+      email_5_body:     abGroup === 'claude' ? (f['Email 5 Body']     || null) : null,
+      email_6_subject:  abGroup === 'claude' ? (f['Email 6 Subject']  || null) : null,
+      email_6_body:     abGroup === 'claude' ? (f['Email 6 Body']     || null) : null,
+      email_7_subject:  abGroup === 'claude' ? (f['Email 7 Subject']  || null) : null,
+      email_7_body:     abGroup === 'claude' ? (f['Email 7 Body']     || null) : null,
+      email_8_subject:  abGroup === 'claude' ? (f['Email 8 Subject']  || null) : null,
+      email_8_body:     abGroup === 'claude' ? (f['Email 8 Body']     || null) : null,
+      email_9_subject:  abGroup === 'claude' ? (f['Email 9 Subject']  || null) : null,
+      email_9_body:     abGroup === 'claude' ? (f['Email 9 Body']     || null) : null,
+      email_10_subject: abGroup === 'claude' ? (f['Email 10 Subject'] || null) : null,
+      email_10_body:    abGroup === 'claude' ? (f['Email 10 Body']    || null) : null,
     };
 
     const contact = {
