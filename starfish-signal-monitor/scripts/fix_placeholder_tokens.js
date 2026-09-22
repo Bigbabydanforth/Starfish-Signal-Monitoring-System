@@ -90,7 +90,9 @@ function substituteTokens(text, { firstName, company, meetingLink, targetCo, sec
     .replace(/\{\{[^}]*\}\}/g, (match) => {
       console.warn(`  ⚠️  Unknown token removed: ${match}`);
       return '';
-    });
+    })
+    // Sign-off guard: strip any sender name after "Best," — belt-and-suspenders.
+    .replace(/\nBest,[ \t]*\n\s*[A-Z][a-z]+\s*$/, '\nBest,');
 }
 
 // ── HubSpot helpers ───────────────────────────────────────────────────────────

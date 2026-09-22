@@ -646,6 +646,26 @@ async function generateClaudeEmails(signal, contact, sender = null) {
     }
   }
 
+  // Programmatic sign-off guard: strip any sender name Claude hallucinated after "Best,".
+  // Catches patterns like "Best,\nDavid" or "Best,\n\nZack" regardless of whitespace.
+  // This runs even though the prompt forbids it — belt-and-suspenders for production safety.
+  const SIGN_OFF_GUARD = /(\nBest,[ \t]*\n)(\s*[A-Z][a-z]+\s*)$/;
+  let signOffStripped = 0;
+  for (const key of requiredKeys) {
+    if (!key.endsWith('_body')) continue;
+    const original = emails[key];
+    const cleaned  = original.replace(SIGN_OFF_GUARD, '\nBest,');
+    if (cleaned !== original) {
+      const stripped = original.match(SIGN_OFF_GUARD)?.[2]?.trim() || '?';
+      console.warn(`[Email Gen] ⚠️  Sign-off guard: removed hallucinated name "${stripped}" from ${key} (${companyName})`);
+      emails[key] = cleaned;
+      signOffStripped++;
+    }
+  }
+  if (signOffStripped > 0) {
+    console.warn(`[Email Gen] ⚠️  ${signOffStripped} email body(ies) had a sender name stripped after "Best," — check MASTER_PROMPT if this recurs`);
+  }
+
   console.log(`[Email Gen] ✓ Generated ${touchCount} emails for ${signal.company_name || signal.company?.name}`);
   requiredKeys.forEach(k => console.log(`  ${k}: ${emails[k].slice(0, 60).replace(/\n/g, ' ')}...`));
 

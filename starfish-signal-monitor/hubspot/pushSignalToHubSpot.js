@@ -94,7 +94,9 @@ function substituteTokens(text, { contactFirstName, contactCompany, meetingLink,
     .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     '') // removed — sign-off is "Best," only, no name
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
-    .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
+    .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category')
+    // Sign-off guard: strip any sender name that appears after "Best," — belt-and-suspenders.
+    .replace(/\nBest,[ \t]*\n\s*[A-Z][a-z]+\s*$/, '\nBest,');
 }
 
 // ── A/B group assignment ──────────────────────────────────────────────────────
