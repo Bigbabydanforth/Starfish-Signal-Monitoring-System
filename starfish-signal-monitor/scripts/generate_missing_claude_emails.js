@@ -53,16 +53,16 @@ function getSenderEmailForType(signalType) {
 }
 
 function getSenderConfig(ownerEmail) {
-  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: '' };
+  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: null };
 }
 
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink, targetCo, sector }) {
+function substituteTokens(text, { contactFirstName, contactCompany, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,    contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,      contactCompany   || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     senderFirstName  || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     '') // removed — sign-off is "Best," only
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
@@ -148,7 +148,7 @@ async function run() {
         'Company Name', 'Signal Type', 'Contact Info', 'Industry',
         'Brief', 'Signal Details', 'Acquired Company', 'Company Website',
         'Bespoke', 'Send Day', 'AB Test Group', 'HubSpot Pushed',
-        'Email 7 Subject', 'Email 8 Subject',
+        'Email 2 Subject', 'Email 7 Subject', 'Email 8 Subject',
       ],
     }, 180000);
   } catch (err) {
@@ -161,11 +161,14 @@ async function run() {
   // ── Filter to records missing new emails ───────────────────────────────────
   const incomplete = records.filter(r => {
     const signalType = r.fields['Signal Type'] || '';
+    const email2     = (r.fields['Email 2 Subject'] || '').trim();
     const email7     = (r.fields['Email 7 Subject'] || '').trim();
     const email8     = (r.fields['Email 8 Subject'] || '').trim();
     const email      = extractEmail(r.fields['Contact Info'] || '');
     if (!email || email.includes(PLACEHOLDER)) return false;
-    return signalType === 'Website Visitor' ? email7 === '' : email8 === '';
+    // Catch both: contacts missing mid-range subjects (2-7) AND contacts missing end subjects (8-10)
+    if (signalType === 'Website Visitor') return email2 === '' || email7 === '';
+    return email2 === '' || email8 === '';
   });
 
   console.log(`  Records missing new emails           : ${incomplete.length}\n`);
@@ -195,7 +198,9 @@ async function run() {
       const r       = emailToRecords.get(email)[0];
       const company = (r.fields['Company Name'] || '(unknown)').padEnd(32);
       const type    = (r.fields['Signal Type'] || '—').padEnd(24);
-      const missing = r.fields['Signal Type'] === 'Website Visitor' ? 'Emails 7,8,9' : 'Emails 8,9,10';
+      const isWV     = r.fields['Signal Type'] === 'Website Visitor';
+      const noEmail2 = (r.fields['Email 2 Subject'] || '').trim() === '';
+      const missing  = noEmail2 ? (isWV ? 'Emails 2-9' : 'Emails 2-10') : (isWV ? 'Emails 7,8,9' : 'Emails 8,9,10');
       console.log(`  ${company} | ${type} | ${missing} | ${email}`);
     }
     if (uniqueEmails.length > 15) console.log(`  ... and ${uniqueEmails.length - 15} more`);
@@ -219,7 +224,10 @@ async function run() {
     const pushed     = f['HubSpot Pushed'] === true;
     const parsed     = parseContact(f['Contact Info'] || '');
     const isWebsite  = signalType.toLowerCase() === 'website visitor';
-    const missingStr = isWebsite ? 'Emails 7,8,9' : 'Emails 8,9,10';
+    const email2Missing = (f['Email 2 Subject'] || '').trim() === '';
+    const missingStr = email2Missing
+      ? (isWebsite ? 'Emails 2-9' : 'Emails 2-10')
+      : (isWebsite ? 'Emails 7,8,9' : 'Emails 8,9,10');
 
     console.log(`[${i + 1}/${uniqueEmails.length}] ${company} [${signalType}] — ${parsed.name || email}`);
     console.log(`  Missing: ${missingStr} | In HubSpot: ${pushed ? 'yes' : 'no'}`);
@@ -283,7 +291,6 @@ async function run() {
     const tokenVars   = {
       contactFirstName: parsed.firstName,
       contactCompany:   company,
-      senderFirstName:  sender.firstName,
       meetingLink:      sender.meetingLink,
       targetCo:         signal.acquired_company || null,
       sector:           industry,
@@ -291,11 +298,94 @@ async function run() {
     const emails = result.emails;
     const sub    = (t) => substituteTokens(t, tokenVars);
 
-    // Build ONLY the new email fields — never overwrite existing emails 1–7
+    // Build email fields to write. If email 2 is also missing, write the full 2-10 set.
+    // Otherwise only write the tail that was missing (8-10 or 7-9 for Website Visitor).
     let newAirtableFields, newHubSpotProps;
 
-    if (isWebsite) {
-      // Website Visitor: was 6, now needs 7, 8, 9
+    if (email2Missing) {
+      if (isWebsite) {
+        // Full backlog — Website Visitor: emails 2-9
+        newAirtableFields = {
+          'Email 2 Subject': sub(emails.email_2_subject) || null,
+          'Email 2 Body':    sub(emails.email_2_body)    || null,
+          'Email 3 Subject': sub(emails.email_3_subject) || null,
+          'Email 3 Body':    sub(emails.email_3_body)    || null,
+          'Email 4 Subject': sub(emails.email_4_subject) || null,
+          'Email 4 Body':    sub(emails.email_4_body)    || null,
+          'Email 5 Subject': sub(emails.email_5_subject) || null,
+          'Email 5 Body':    sub(emails.email_5_body)    || null,
+          'Email 6 Subject': sub(emails.email_6_subject) || null,
+          'Email 6 Body':    sub(emails.email_6_body)    || null,
+          'Email 7 Subject': sub(emails.email_7_subject) || null,
+          'Email 7 Body':    sub(emails.email_7_body)    || null,
+          'Email 8 Subject': sub(emails.email_8_subject) || null,
+          'Email 8 Body':    sub(emails.email_8_body)    || null,
+          'Email 9 Subject': sub(emails.email_9_subject) || null,
+          'Email 9 Body':    sub(emails.email_9_body)    || null,
+        };
+        newHubSpotProps = {
+          email_2_subject: sub(emails.email_2_subject) || null,
+          email_2_body:    sub(emails.email_2_body)    || null,
+          email_3_subject: sub(emails.email_3_subject) || null,
+          email_3_body:    sub(emails.email_3_body)    || null,
+          email_4_subject: sub(emails.email_4_subject) || null,
+          email_4_body:    sub(emails.email_4_body)    || null,
+          email_5_subject: sub(emails.email_5_subject) || null,
+          email_5_body:    sub(emails.email_5_body)    || null,
+          email_6_subject: sub(emails.email_6_subject) || null,
+          email_6_body:    sub(emails.email_6_body)    || null,
+          email_7_subject: sub(emails.email_7_subject) || null,
+          email_7_body:    sub(emails.email_7_body)    || null,
+          email_8_subject: sub(emails.email_8_subject) || null,
+          email_8_body:    sub(emails.email_8_body)    || null,
+          email_9_subject: sub(emails.email_9_subject) || null,
+          email_9_body:    sub(emails.email_9_body)    || null,
+        };
+      } else {
+        // Full backlog — all other types: emails 2-10
+        newAirtableFields = {
+          'Email 2 Subject':  sub(emails.email_2_subject)  || null,
+          'Email 2 Body':     sub(emails.email_2_body)     || null,
+          'Email 3 Subject':  sub(emails.email_3_subject)  || null,
+          'Email 3 Body':     sub(emails.email_3_body)     || null,
+          'Email 4 Subject':  sub(emails.email_4_subject)  || null,
+          'Email 4 Body':     sub(emails.email_4_body)     || null,
+          'Email 5 Subject':  sub(emails.email_5_subject)  || null,
+          'Email 5 Body':     sub(emails.email_5_body)     || null,
+          'Email 6 Subject':  sub(emails.email_6_subject)  || null,
+          'Email 6 Body':     sub(emails.email_6_body)     || null,
+          'Email 7 Subject':  sub(emails.email_7_subject)  || null,
+          'Email 7 Body':     sub(emails.email_7_body)     || null,
+          'Email 8 Subject':  sub(emails.email_8_subject)  || null,
+          'Email 8 Body':     sub(emails.email_8_body)     || null,
+          'Email 9 Subject':  sub(emails.email_9_subject)  || null,
+          'Email 9 Body':     sub(emails.email_9_body)     || null,
+          'Email 10 Subject': sub(emails.email_10_subject) || null,
+          'Email 10 Body':    sub(emails.email_10_body)    || null,
+        };
+        newHubSpotProps = {
+          email_2_subject:  sub(emails.email_2_subject)  || null,
+          email_2_body:     sub(emails.email_2_body)     || null,
+          email_3_subject:  sub(emails.email_3_subject)  || null,
+          email_3_body:     sub(emails.email_3_body)     || null,
+          email_4_subject:  sub(emails.email_4_subject)  || null,
+          email_4_body:     sub(emails.email_4_body)     || null,
+          email_5_subject:  sub(emails.email_5_subject)  || null,
+          email_5_body:     sub(emails.email_5_body)     || null,
+          email_6_subject:  sub(emails.email_6_subject)  || null,
+          email_6_body:     sub(emails.email_6_body)     || null,
+          email_7_subject:  sub(emails.email_7_subject)  || null,
+          email_7_body:     sub(emails.email_7_body)     || null,
+          email_8_subject:  sub(emails.email_8_subject)  || null,
+          email_8_body:     sub(emails.email_8_body)     || null,
+          email_9_subject:  sub(emails.email_9_subject)  || null,
+          email_9_body:     sub(emails.email_9_body)     || null,
+          email_10_subject: sub(emails.email_10_subject) || null,
+          email_10_body:    sub(emails.email_10_body)    || null,
+        };
+      }
+    } else if (isWebsite) {
+      // Partial fill — Website Visitor: only missing 7, 8, 9
       newAirtableFields = {
         'Email 7 Subject': sub(emails.email_7_subject) || null,
         'Email 7 Body':    sub(emails.email_7_body)    || null,
@@ -313,7 +403,7 @@ async function run() {
         email_9_body:    sub(emails.email_9_body)    || null,
       };
     } else {
-      // All other types: was 7, now needs 8, 9, 10
+      // Partial fill — all other types: only missing 8, 9, 10
       newAirtableFields = {
         'Email 8 Subject':  sub(emails.email_8_subject)  || null,
         'Email 8 Body':     sub(emails.email_8_body)     || null,

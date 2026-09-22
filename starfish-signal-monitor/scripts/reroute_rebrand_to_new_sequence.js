@@ -17,7 +17,7 @@
  *   Starfish: 310220684  (HS_SEQ_REBRAND_STARFISH env var)
  *   Claude  : 310704131  (HS_SEQ_REBRAND_CLAUDE env var)
  *
- * Sender: zack@starfishbci.com  (ZACK_BCI_SENDER_EMAIL env var)
+ * Sender: zack@starfishco.com  (ZACK_SENDER_EMAIL env var)
  *
  * Run:
  *   node --env-file=.env scripts/reroute_rebrand_to_new_sequence.js            (preview — no changes)
@@ -49,13 +49,13 @@ function pause(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Token substitution ────────────────────────────────────────────────────────
 // Mirrors pushSignalToHubSpot.js substituteTokens — must stay in sync.
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink }) {
+function substituteTokens(text, { contactFirstName, contactCompany, meetingLink }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,  contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,     contactCompany   || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    senderFirstName  || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    '') // removed — sign-off is "Best," only
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi, meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,             'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,               'your category');
@@ -375,7 +375,6 @@ async function run() {
       const subst = (t) => substituteTokens(t, {
         contactFirstName: parsed.firstName,
         contactCompany:   company,
-        senderFirstName:  SENDER_CONFIG.firstName,
         meetingLink:      SENDER_CONFIG.meetingLink,
       });
 

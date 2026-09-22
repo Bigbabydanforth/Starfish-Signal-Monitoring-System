@@ -43,18 +43,18 @@ function getSenderEmailForType(signalType) {
 }
 
 function getSenderConfig(ownerEmail) {
-  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: '' };
+  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: null };
 }
 
 // Replaces all tokens with real values before writing to Airtable.
 // Mirrors pushSignalToHubSpot.js substituteTokens — must stay in sync.
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink, targetCo, sector }) {
+function substituteTokens(text, { contactFirstName, contactCompany, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,    contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,      contactCompany   || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     senderFirstName  || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     '') // removed — sign-off is "Best," only
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
@@ -263,7 +263,6 @@ async function run() {
     const tokenVars  = {
       contactFirstName: parsed.firstName,
       contactCompany:   company,
-      senderFirstName:  sender.firstName,
       meetingLink:      sender.meetingLink,
       targetCo:         signal.acquired_company || null,
       sector:           industry,

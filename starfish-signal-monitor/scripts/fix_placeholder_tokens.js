@@ -76,13 +76,13 @@ function getSenderForType(signalType) {
   return ANDREW; // News/Press → Andrew (permanent)
 }
 
-function substituteTokens(text, { firstName, company, senderFirstName, meetingLink, targetCo, sector }) {
+function substituteTokens(text, { firstName, company, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,   firstName      || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,  firstName      || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,     company        || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    senderFirstName || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    '') // removed — sign-off is "Best," only
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi, meetingLink    || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,             targetCo       || 'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,               sector         || 'your category')
@@ -211,11 +211,10 @@ async function run() {
 
     // Build substitution vars
     const senderEmail  = getSenderForType(signalType);
-    const senderCfg    = SENDER_CONFIGS[senderEmail] || { firstName: '', meetingLink: '' };
+    const senderCfg    = SENDER_CONFIGS[senderEmail] || { firstName: '', meetingLink: null };
     const tokenVars    = {
       firstName:      parsed.firstName,
       company:        company,
-      senderFirstName: senderCfg.firstName,
       meetingLink:    senderCfg.meetingLink,
       targetCo,
       sector:         industry,

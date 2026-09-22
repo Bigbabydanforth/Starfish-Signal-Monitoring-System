@@ -75,7 +75,7 @@ Subject line rules (read these carefully — they determine whether the email ge
 Personalization tokens (write these literally, exactly as shown)
 - {{contact.firstname}} — greeting. Fallback: there.
 - {{contact.company}} — the prospect's company. Fallback: your brand. For possessive, write {{contact.company}}'s (apostrophe-s outside the token, never inside the braces).
-- Sign off every email body with "Best," on its own line, then {{sender.firstname}} on the next line. Do not hardcode a person's name — use the token. The sender's full signature is appended automatically by HubSpot.
+- Sign off every email body with "Best," on its own line only. Do NOT write a sender name after it — no {{sender.firstname}}, no hardcoded name. The sender's full email signature (name, title, contact details) is appended automatically by HubSpot. Writing a name here creates a duplicate and will show the wrong name.
 - Any signal-specific tokens are listed in that Signal Block.
 
 OUTPUT FORMAT — CRITICAL:

@@ -85,13 +85,13 @@ const SIGNAL_TYPE_SOURCE_MAP = {
 // Replaces all HubSpot/Claude tokens in a generated email string with real values.
 // HubSpot does NOT perform a second-pass substitution inside contact property values,
 // so we pre-fill everything before saving — the stored email is already fully written.
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink, targetCo, sector }) {
+function substituteTokens(text, { contactFirstName, contactCompany, meetingLink, targetCo, sector }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,    contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,      contactCompany   || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     senderFirstName  || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,     '') // removed — sign-off is "Best," only, no name
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi,  meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,              targetCo         || 'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,                sector           || 'your category');
@@ -279,7 +279,6 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
       const tokenVars = {
         contactFirstName: firstname,
         contactCompany:   companyName,
-        senderFirstName:  senderConfig.firstName,
         meetingLink:      senderConfig.meetingLink,
         targetCo:         signal.acquired_company || signal.deal?.seller || null,
         sector:           industry,
@@ -320,7 +319,6 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
         const tokenVars = {
           contactFirstName: firstname,
           contactCompany:   companyName,
-          senderFirstName:  senderConfig.firstName,
           meetingLink:      senderConfig.meetingLink,
           targetCo:         signal.acquired_company || signal.deal?.seller || null,
           sector:           industry,

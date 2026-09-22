@@ -175,13 +175,13 @@ async function apolloLookupByEmail(email) {
 }
 
 // ── Token substitution ────────────────────────────────────────────────────────
-function substituteTokens(text, { contactFirstName, contactCompany, senderFirstName, meetingLink }) {
+function substituteTokens(text, { contactFirstName, contactCompany, meetingLink }) {
   if (!text) return text;
   return text
     .replace(/\{\{\s*contact\.firstname\s*\}\}/gi,   contactFirstName || 'there')
     .replace(/\{\{\s*contact\.first_name\s*\}\}/gi,  contactFirstName || 'there')
     .replace(/\{\{\s*contact\.company\s*\}\}/gi,     contactCompany   || 'your company')
-    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    senderFirstName  || '')
+    .replace(/\{\{\s*sender\.firstname\s*\}\}/gi,    '') // removed — sign-off is "Best," only
     .replace(/\{\{\s*owner\.meetings_link\s*\}\}/gi, meetingLink      || '')
     .replace(/\{\{\s*TargetCo\s*\}\}/gi,             'the acquired company')
     .replace(/\{\{\s*Sector\s*\}\}/gi,               'your category');
@@ -446,7 +446,6 @@ async function run() {
     const subst = (t) => substituteTokens(t, {
       contactFirstName: firstName,
       contactCompany:   company,
-      senderFirstName:  SENDER_CONFIG.firstName,
       meetingLink:      SENDER_CONFIG.meetingLink,
     });
 

@@ -31,7 +31,8 @@ import 'dotenv/config';
 
 // ── Sender configs: first name + meeting link ─────────────────────────────────
 // Used by substituteTokens() in pushSignalToHubSpot.js to replace
-// {{ sender.firstname }} and {{ owner.meetings_link }} in Claude-generated emails.
+// {{ owner.meetings_link }} in Claude-generated emails.
+// NOTE: {{ sender.firstname }} is no longer used — sign-off is "Best," only.
 export const SENDER_CONFIGS = {
   'david@starfishco.com': {
     firstName:   'David',
@@ -60,7 +61,7 @@ export const SENDER_CONFIGS = {
  * Falls back to empty strings if the email is not in the config.
  */
 export function getSenderConfig(ownerEmail) {
-  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: '' };
+  return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: null };
 }
 
 // ── Cole / Andrew sender logic ────────────────────────────────────────────────
