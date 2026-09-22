@@ -42,12 +42,14 @@ function extractEmail(ci) {
 // Same logic as generate_claude_emails_backlog.js — avoids side-effecting the
 // Cole/Andrew round-robin counter in sequenceRouting.js.
 function getSenderEmailForType(signalType) {
-  const DAVID = process.env.DAVID_SENDER_EMAIL || 'david@starfishco.com';
-  const ZACK  = process.env.ZACK_SENDER_EMAIL  || 'zack@starfishco.com';
-  const COLE  = process.env.COLE_SENDER_EMAIL  || 'cole@starfishco.com';
+  const DAVID   = process.env.DAVID_SENDER_EMAIL   || 'david@starfishco.com';
+  const ZACK    = process.env.ZACK_SENDER_EMAIL    || 'zack@starfishco.com';
+  const COLE    = process.env.COLE_SENDER_EMAIL    || 'cole@starfishco.com';
+  const ANDREW  = process.env.ANDREW_SENDER_EMAIL  || 'andrew@starfishco.com';
   if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return DAVID;
   if (['Website Visitor', 'Rebrand'].includes(signalType)) return ZACK;
-  return COLE; // News/Press, Brand Strategy Intent
+  if (signalType === 'Brand Strategy Intent') return COLE;   // BSI → Cole (permanent)
+  return ANDREW; // News/Press → Andrew (permanent)
 }
 
 function getSenderConfig(ownerEmail) {
@@ -216,7 +218,7 @@ async function run() {
     const industry   = f['Industry']     || '';
     const pushed     = f['HubSpot Pushed'] === true;
     const parsed     = parseContact(f['Contact Info'] || '');
-    const isWebsite  = signalType === 'Website Visitor';
+    const isWebsite  = signalType.toLowerCase() === 'website visitor';
     const missingStr = isWebsite ? 'Emails 7,8,9' : 'Emails 8,9,10';
 
     console.log(`[${i + 1}/${uniqueEmails.length}] ${company} [${signalType}] — ${parsed.name || email}`);
@@ -250,10 +252,19 @@ async function run() {
       email,
     };
 
+    // Resolve sender before calling Claude so the correct meeting link is baked into the prompt
+    const senderEmail         = getSenderEmailForType(signalType);
+    const sender              = getSenderConfig(senderEmail);
+    const senderForGeneration = {
+      name:        sender.firstName,
+      email:       senderEmail,
+      meetingLink: sender.meetingLink || null,
+    };
+
     // Call Claude
     let result;
     try {
-      result = await generateClaudeEmails(signal, contact);
+      result = await generateClaudeEmails(signal, contact, senderForGeneration);
     } catch (err) {
       console.log(`  ✗ Unexpected Claude error: ${err.message}\n`);
       failed++;
@@ -269,8 +280,6 @@ async function run() {
     }
 
     // Token substitution
-    const senderEmail = getSenderEmailForType(signalType);
-    const sender      = getSenderConfig(senderEmail);
     const tokenVars   = {
       contactFirstName: parsed.firstName,
       contactCompany:   company,
@@ -296,12 +305,12 @@ async function run() {
         'Email 9 Body':    sub(emails.email_9_body)    || null,
       };
       newHubSpotProps = {
-        email_7_subject: sub(emails.email_7_subject) || '',
-        email_7_body:    sub(emails.email_7_body)    || '',
-        email_8_subject: sub(emails.email_8_subject) || '',
-        email_8_body:    sub(emails.email_8_body)    || '',
-        email_9_subject: sub(emails.email_9_subject) || '',
-        email_9_body:    sub(emails.email_9_body)    || '',
+        email_7_subject: sub(emails.email_7_subject) || null,
+        email_7_body:    sub(emails.email_7_body)    || null,
+        email_8_subject: sub(emails.email_8_subject) || null,
+        email_8_body:    sub(emails.email_8_body)    || null,
+        email_9_subject: sub(emails.email_9_subject) || null,
+        email_9_body:    sub(emails.email_9_body)    || null,
       };
     } else {
       // All other types: was 7, now needs 8, 9, 10
@@ -314,12 +323,12 @@ async function run() {
         'Email 10 Body':    sub(emails.email_10_body)    || null,
       };
       newHubSpotProps = {
-        email_8_subject:  sub(emails.email_8_subject)  || '',
-        email_8_body:     sub(emails.email_8_body)     || '',
-        email_9_subject:  sub(emails.email_9_subject)  || '',
-        email_9_body:     sub(emails.email_9_body)     || '',
-        email_10_subject: sub(emails.email_10_subject) || '',
-        email_10_body:    sub(emails.email_10_body)    || '',
+        email_8_subject:  sub(emails.email_8_subject)  || null,
+        email_8_body:     sub(emails.email_8_body)     || null,
+        email_9_subject:  sub(emails.email_9_subject)  || null,
+        email_9_body:     sub(emails.email_9_body)     || null,
+        email_10_subject: sub(emails.email_10_subject) || null,
+        email_10_body:    sub(emails.email_10_body)    || null,
       };
     }
 
@@ -371,7 +380,7 @@ async function run() {
   console.log(`  Failed                          : ${failed}`);
   console.log(`  Total attempted                 : ${uniqueEmails.length}`);
   if (generated < uniqueEmails.length && BATCH < Infinity) {
-    console.log(`\n  Run again with --batch=${BATCH} --offset or remove --batch to process the rest.`);
+    console.log(`\n  Run again without --batch to process the rest, or increase the batch size.`);
   }
   console.log('════════════════════════════════════════════════════════════');
 }

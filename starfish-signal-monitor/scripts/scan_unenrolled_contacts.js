@@ -87,7 +87,7 @@ async function run() {
   if (!HS_TOKEN) { console.error('HUBSPOT_PRIVATE_APP_TOKEN not set'); process.exit(1); }
 
   console.log('════════════════════════════════════════════════════════════');
-  console.log('UNENROLLED CONTACTS AUDIT — 3-week backlog (Aug 17 – Sep 7, 2026)');
+  console.log(`UNENROLLED CONTACTS AUDIT — rolling 30-day window (since ${CUTOFF_DATE})`);
   console.log(`Mode : ${FIX ? 'FIX — enrolling into correct sequences' : 'SCAN — no changes'}`);
   console.log('════════════════════════════════════════════════════════════\n');
 
@@ -163,17 +163,19 @@ async function run() {
     byType[c.signalType].push(c);
   }
 
+  // Note: getSequenceRoute is NOT called in the display loop for News/Press and BSI
+  // contacts because those signal types use a module-level Cole/Andrew round-robin
+  // counter. Calling it here (even just for display) would permanently advance that
+  // counter for the next pipeline run. The fix loop below only calls it when actually
+  // enrolling, which is the unavoidable case.
   console.log('\n── Unenrolled contacts by signal type ────────────────────');
   for (const [type, items] of Object.entries(byType)) {
     console.log(`\n  ${type} (${items.length})`);
     for (const c of items) {
-      const route = getSequenceRoute(c.signalType, c.abGroup);
-      const seqId = route?.sequenceId || '(no sequence ID)';
-      const owner = route?.ownerEmail || '(no owner)';
       console.log(`    ${(c.company).padEnd(30)} | ${c.abGroup.padEnd(8)} | ${c.email}`);
-      console.log(`      → Sequence: ${seqId}  |  Sender: ${owner}`);
     }
   }
+  console.log(`\n  To see sequence/sender routing, check hubspot/sequenceRouting.js.`);
 
   if (!FIX) {
     console.log(`\n\nRun with --fix to enroll all ${unenrolled.length} contact(s) into their sequences.`);

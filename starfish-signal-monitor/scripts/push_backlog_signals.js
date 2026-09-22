@@ -356,8 +356,9 @@ async function run() {
       email_8_body:     abGroup === 'claude' ? (f['Email 8 Body']     || null) : null,
       email_9_subject:  abGroup === 'claude' ? (f['Email 9 Subject']  || null) : null,
       email_9_body:     abGroup === 'claude' ? (f['Email 9 Body']     || null) : null,
-      email_10_subject: abGroup === 'claude' ? (f['Email 10 Subject'] || null) : null,
-      email_10_body:    abGroup === 'claude' ? (f['Email 10 Body']    || null) : null,
+      // Website Visitor uses 9 emails — email_10 must not be passed even as null
+      email_10_subject: (abGroup === 'claude' && f['Signal Type'] !== 'Website Visitor') ? (f['Email 10 Subject'] || null) : null,
+      email_10_body:    (abGroup === 'claude' && f['Signal Type'] !== 'Website Visitor') ? (f['Email 10 Body']    || null) : null,
     };
 
     const contact = {

@@ -66,12 +66,14 @@ function parseContact(ci) {
 }
 
 function getSenderForType(signalType) {
-  const DAVID = process.env.DAVID_SENDER_EMAIL || 'david@starfishco.com';
-  const ZACK  = process.env.ZACK_SENDER_EMAIL  || 'zack@starfishco.com';
-  const COLE  = process.env.COLE_SENDER_EMAIL  || 'cole@starfishco.com';
+  const DAVID   = process.env.DAVID_SENDER_EMAIL   || 'david@starfishco.com';
+  const ZACK    = process.env.ZACK_SENDER_EMAIL    || 'zack@starfishco.com';
+  const COLE    = process.env.COLE_SENDER_EMAIL    || 'cole@starfishco.com';
+  const ANDREW  = process.env.ANDREW_SENDER_EMAIL  || 'andrew@starfishco.com';
   if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return DAVID;
   if (['Website Visitor', 'Rebrand'].includes(signalType)) return ZACK;
-  return COLE;
+  if (signalType === 'Brand Strategy Intent') return COLE;   // BSI → Cole (permanent)
+  return ANDREW; // News/Press → Andrew (permanent)
 }
 
 function substituteTokens(text, { firstName, company, senderFirstName, meetingLink, targetCo, sector }) {

@@ -33,7 +33,7 @@ const APOLLO_KEY   = process.env.APOLLO_API_KEY;
 const REBRAND_CLAUDE_SEQ   = process.env.HS_SEQ_REBRAND_CLAUDE   || '310704131';
 const SENDER_EMAIL         = process.env.ZACK_SENDER_EMAIL        || 'zack@starfishco.com';
 const SENDER_USER_ID       = process.env.ZACK_HUBSPOT_OWNER_ID    || null;
-const SENDER_CONFIG        = SENDER_CONFIGS[SENDER_EMAIL]         || { firstName: 'Zack', meetingLink: '' };
+const SENDER_CONFIG        = SENDER_CONFIGS[SENDER_EMAIL]         || { firstName: 'Zack', meetingLink: null };
 
 function pause(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -424,9 +424,14 @@ async function run() {
     };
 
     console.log('  Generating Rebrand emails...');
+    const senderForGeneration = {
+      name:        SENDER_CONFIG.firstName,
+      email:       SENDER_EMAIL,
+      meetingLink: SENDER_CONFIG.meetingLink || null,
+    };
     let emailResult;
     try {
-      emailResult = await generateClaudeEmails(signal, contact);
+      emailResult = await generateClaudeEmails(signal, contact, senderForGeneration);
     } catch (err) {
       console.log(`  ✗ Claude API error: ${err.message} — skipping`);
       failed++;

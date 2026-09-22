@@ -63,8 +63,9 @@ export function getSenderConfig(ownerEmail) {
   return SENDER_CONFIGS[ownerEmail] || { firstName: '', meetingLink: '' };
 }
 
-// ── Cole / Andrew 50/50 alternating split ────────────────────────────────────
-// News/Press and BSI alternate between Cole and Andrew on each call.
+// ── Cole / Andrew sender logic ────────────────────────────────────────────────
+// Starfish group (News/Press + BSI): alternates between Cole and Andrew on each call.
+// Claude group (News/Press + BSI): fixed — BSI → Cole, News/Press → Andrew. No alternating.
 // Counter is module-level so it persists across signals in a single pipeline run.
 // Resets to 0 on each pipeline restart — that's fine for the 50/50 distribution.
 let coleAndrewIndex = 0;
@@ -87,9 +88,9 @@ function getColeAndrewSender() {
 }
 
 // ── Routing table ─────────────────────────────────────────────────────────────
-// NOTE: News/Press and BSI use getColeAndrewSender() — this function
-// is called at route-lookup time (not at module load), so the alternation is
-// correct across signals in a single run.
+// NOTE: For Starfish group, News/Press and BSI use getColeAndrewSender() — called
+// at route-lookup time so alternation is correct across signals in a single run.
+// For Claude group, BSI → Cole and News/Press → Andrew (fixed, no alternating).
 const STATIC_ROUTING = {
   'Job Change': {
     ownerEmail: process.env.DAVID_SENDER_EMAIL      || 'david@starfishco.com',
@@ -141,10 +142,25 @@ const COLE_ANDREW_SEQ = {
  */
 export function getSequenceRoute(signalType, abGroup = 'starfish') {
   if (COLE_ANDREW_SIGNAL_TYPES.has(signalType)) {
+    const seqs = COLE_ANDREW_SEQ[signalType];
+
+    if (abGroup === 'claude') {
+      // Claude group: fixed sender assignment — no alternating.
+      // BSI → Cole. News/Press → Andrew. Permanent rule.
+      const fixedSender = signalType === 'Brand Strategy Intent'
+        ? { email: process.env.COLE_SENDER_EMAIL   || 'cole@starfishco.com',   ownerId: process.env.COLE_HUBSPOT_OWNER_ID   || null }
+        : { email: process.env.ANDREW_SENDER_EMAIL || 'andrew@starfishco.com', ownerId: process.env.ANDREW_HUBSPOT_OWNER_ID || null };
+      return {
+        sequenceId: seqs?.claude || null,
+        ownerId:    fixedSender.ownerId,
+        ownerEmail: fixedSender.email,
+      };
+    }
+
+    // Starfish group: keep alternating between Cole and Andrew.
     const sender = getColeAndrewSender();
-    const seqs   = COLE_ANDREW_SEQ[signalType];
     return {
-      sequenceId: (abGroup === 'claude' ? seqs?.claude : seqs?.starfish) || null,
+      sequenceId: seqs?.starfish || null,
       ownerId:    sender.ownerId,
       ownerEmail: sender.email,
     };

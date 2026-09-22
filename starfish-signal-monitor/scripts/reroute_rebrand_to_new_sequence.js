@@ -39,7 +39,7 @@ const REBRAND_STARFISH_SEQ = process.env.HS_SEQ_REBRAND_STARFISH || '310220684';
 const REBRAND_CLAUDE_SEQ   = process.env.HS_SEQ_REBRAND_CLAUDE   || '310704131';
 const SENDER_EMAIL         = process.env.ZACK_SENDER_EMAIL     || 'zack@starfishco.com';
 const SENDER_USER_ID       = process.env.ZACK_HUBSPOT_OWNER_ID || null;
-const SENDER_CONFIG        = SENDER_CONFIGS[SENDER_EMAIL] || { firstName: 'Zack', meetingLink: '' };
+const SENDER_CONFIG        = SENDER_CONFIGS[SENDER_EMAIL] || { firstName: 'Zack', meetingLink: null };
 
 const PREVIEW = !process.argv.includes('--live') && !process.argv.includes('--single');
 const SINGLE  = process.argv.includes('--single');
@@ -349,9 +349,15 @@ async function run() {
         email,
       };
 
+      const senderForGeneration = {
+        name:        SENDER_CONFIG.firstName,
+        email:       SENDER_EMAIL,
+        meetingLink: SENDER_CONFIG.meetingLink || null,
+      };
+
       let result;
       try {
-        result = await generateClaudeEmails(signal, contact);
+        result = await generateClaudeEmails(signal, contact, senderForGeneration);
       } catch (err) {
         console.log(`  ✗ Claude API error: ${err.message} — skipping contact`);
         failed++;

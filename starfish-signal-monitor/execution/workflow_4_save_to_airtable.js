@@ -36,8 +36,9 @@ import { getKnownDomain } from './utils/known_domains.js';
 import { isFakeEmail, verifyEmail } from './utils/email_validator.js';
 import { getBreaker } from './utils/circuit_breaker.js';
 import { extractDomain, findEmailWithApollo, findEmailWithHunterPerson, findEmailWithHunterDomain, HUNTER_BSI_TITLE_KEYWORDS, HUNTER_BSI_DEPT_KEYWORDS } from './utils/email_enrichment.js';
-import { pushSignalToHubSpot } from '../hubspot/pushSignalToHubSpot.js';
+import { pushSignalToHubSpot, assignAbGroup } from '../hubspot/pushSignalToHubSpot.js';
 import { generateClaudeEmails } from '../hubspot/generateClaudeEmails.js';
+import { SENDER_CONFIGS } from '../hubspot/sequenceRouting.js';
 import { findBroadcastContacts, getSendDay } from './utils/broadcast_contacts.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1628,17 +1629,36 @@ function formatForAirtable(signal, broadcastContact, emailData = {}) {
       // Claude email generation fields.
       // Pipeline path: populated here when CLAUDE_EMAILS_ENABLED=true and contact is Claude group.
       // Dashboard path: defaults used here; pushSignalToHubSpot() backfills via updateRecords().
+      // Only include AB group and email fields when actually set — omitting entirely avoids
+      // writing null over existing data when Claude emails were not generated this run.
       'Claude Generated':    emailData.claudeGenerated   || false,
       'Claude Generated At': emailData.claudeGeneratedAt || null,
       'AB Test Group':       emailData.abGroup           || null,
-      'Email 1 Subject':     emailData.emails?.email_1_subject || null,
-      'Email 1 Body':        emailData.emails?.email_1_body    || null,
-      'Email 2 Body':        emailData.emails?.email_2_body    || null,
-      'Email 3 Body':        emailData.emails?.email_3_body    || null,
-      'Email 4 Body':        emailData.emails?.email_4_body    || null,
-      'Email 5 Body':        emailData.emails?.email_5_body    || null,
-      'Email 6 Body':        emailData.emails?.email_6_body    || null,
-      'Email 7 Body':        emailData.emails?.email_7_body    || null,
+      ...(emailData.emails ? {
+        'Email 1 Subject':  emailData.emails.email_1_subject  || null,
+        'Email 1 Body':     emailData.emails.email_1_body     || null,
+        'Email 2 Subject':  emailData.emails.email_2_subject  || null,
+        'Email 2 Body':     emailData.emails.email_2_body     || null,
+        'Email 3 Subject':  emailData.emails.email_3_subject  || null,
+        'Email 3 Body':     emailData.emails.email_3_body     || null,
+        'Email 4 Subject':  emailData.emails.email_4_subject  || null,
+        'Email 4 Body':     emailData.emails.email_4_body     || null,
+        'Email 5 Subject':  emailData.emails.email_5_subject  || null,
+        'Email 5 Body':     emailData.emails.email_5_body     || null,
+        'Email 6 Subject':  emailData.emails.email_6_subject  || null,
+        'Email 6 Body':     emailData.emails.email_6_body     || null,
+        'Email 7 Subject':  emailData.emails.email_7_subject  || null,
+        'Email 7 Body':     emailData.emails.email_7_body     || null,
+        'Email 8 Subject':  emailData.emails.email_8_subject  || null,
+        'Email 8 Body':     emailData.emails.email_8_body     || null,
+        'Email 9 Subject':  emailData.emails.email_9_subject  || null,
+        'Email 9 Body':     emailData.emails.email_9_body     || null,
+        // Website Visitor uses 9 emails — omit Email 10 to avoid writing null over any existing value
+        ...(signal.type !== 'Website Visitor' ? {
+          'Email 10 Subject': emailData.emails.email_10_subject || null,
+          'Email 10 Body':    emailData.emails.email_10_body    || null,
+        } : {}),
+      } : {}),
     }
   };
 }
@@ -1649,17 +1669,40 @@ function formatForAirtable(signal, broadcastContact, emailData = {}) {
 // CLAUDE_API_KEY check prevents accidental charges if the key is missing.
 const claudeEmailsEnabled = !!process.env.CLAUDE_API_KEY && process.env.CLAUDE_EMAILS_ENABLED === 'true';
 
+// Same logic as the backlog scripts — avoids side-effecting the Cole/Andrew
+// round-robin counter in sequenceRouting.js.
+function getSenderEmailForType(signalType) {
+  const DAVID   = process.env.DAVID_SENDER_EMAIL   || 'david@starfishco.com';
+  const ZACK    = process.env.ZACK_SENDER_EMAIL    || 'zack@starfishco.com';
+  const COLE    = process.env.COLE_SENDER_EMAIL    || 'cole@starfishco.com';
+  const ANDREW  = process.env.ANDREW_SENDER_EMAIL  || 'andrew@starfishco.com';
+  if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return DAVID;
+  if (['Website Visitor', 'Rebrand'].includes(signalType)) return ZACK;
+  if (signalType === 'Brand Strategy Intent') return COLE;   // BSI → Cole (permanent)
+  return ANDREW; // News/Press → Andrew (permanent)
+}
+
 // Generates Claude emails for one contact and returns an emailData object for
 // use in formatForAirtable(). Non-fatal — failures fall back to Starfish group.
 async function generateEmailData(signal, contact) {
   if (!claudeEmailsEnabled || signal.bespoke) return {};
 
-  const abGroup = Math.random() < 0.75 ? 'starfish' : 'claude';
+  // Use shared assignAbGroup so BSI gets 50/50 and bespoke always gets starfish,
+  // matching the same distribution logic used in pushSignalToHubSpot.
+  const signalType   = signal.type || signal.signal_type || '';
+  const abGroup      = assignAbGroup(signal.bespoke === true, signalType);
   // Store on signal so Step 4.7 auto-push can read it without re-assigning randomly.
   signal.ab_test_group = abGroup;
   if (abGroup !== 'claude') return { abGroup: 'starfish' };
+  const senderEmail  = getSenderEmailForType(signalType);
+  const senderCfg    = SENDER_CONFIGS[senderEmail] || { firstName: '', meetingLink: '' };
+  const senderForGeneration = {
+    name:        senderCfg.firstName,
+    email:       senderEmail,
+    meetingLink: senderCfg.meetingLink || null,
+  };
 
-  const emailResult = await generateClaudeEmails(signal, contact);
+  const emailResult = await generateClaudeEmails(signal, contact, senderForGeneration);
   if (emailResult.success) {
     console.log(`[Workflow 4] Claude emails generated for ${signal.company?.name || signal.company_name || '?'}`);
     return {

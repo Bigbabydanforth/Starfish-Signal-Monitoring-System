@@ -42,25 +42,35 @@ Inputs you will be given below. The signal type and its Signal Block, the prospe
 Structure and cadence (fixed unless the Signal Block overrides)
 - 10 touches. Touches 1–7 keep the original cadence, business-day delays 3, 5, 6, 6, 7, 8 (Day 0, 3, 8, 14, 20, 27, 35). Touches 8–10 are quarterly reconnect touches, spaced 28 days apart (Day 63, 91, 119).
 - Threading. Every touch opens its own new thread and carries its own subject line — no replies, no "Re:" threads. Write a distinct subject for each of the 10 touches, following the subject-line rules below.
-- Meeting CTA on Touches 1, 4, and 6. Use a first-person link label such as "Grab 10 minutes with me" or "Grab time with me" as an HTML anchor tag pointing to {{owner.meetings_link}}. Example: <a href="{{owner.meetings_link}}">Grab 10 minutes with me</a>. The other touches end on a lighter question or the diagnostic offer, no hard booking ask.
+- Meeting CTA on Touches 1, 4, and 6. Place the CTA at the end of the email — never buried in the middle. The sentence immediately before the link must make the VALUE of clicking clear: what the person gets from the conversation, not just "let's chat." Write the link label in first person, specific and active. Examples of strong labels: "Grab 20 minutes with me", "Book the diagnostic call", "Let's look at it together". Avoid weak labels like "click here" or "learn more". Write the link as an HTML anchor tag using the exact booking URL provided in PROSPECT DATA. Example: <a href="BOOKING_URL_FROM_PROSPECT_DATA">Grab 20 minutes with me</a>. The other touches end on a lighter question or the diagnostic offer — no hard booking ask.
 - The arc (write to this; vary the angle and wording each run):
-  Touch 1 — Open on the signal itself. Name what's at stake because of it. Soft meeting CTA.
-  Touch 2 — Sharpen the problem: the first impression often isn't the brand's to make anymore; AI forms its own read before a person arrives.
-  Touch 3 — What the AI layer specifically does with them (summaries, rankings, recommendations). You may reference the article "Protecting Your Brand's Soul in the Age of AI" here. Curiosity CTA, no hard ask.
-  Touch 4 — Credibility: McKinsey's research that brand coherence is now a structural advantage in the AI era, and it has to hold across both worlds. Meeting CTA.
-  Touch 5 — Offer the free Brand Intelligence diagnostic as the low-friction first step. "Want one?"
-  Touch 6 — The "two worlds, one brand" close. Meeting CTA.
-  Touch 7 — Not the right time, for now: leave the door open, restate the diagnostic as an easy first step. No pressure, no explicit goodbye — just make it easy to say yes later.
-  Touch 8 — Day 63 reconnect: a light check-in on whether brand has become a priority since. Restate the diagnostic offer. Low pressure, explicitly no commitments.
-  Touch 9 — Day 91 reconnect: end-of-year framing (budget and planning season). Restate the diagnostic offer, same low-pressure, no-commitments tone.
-  Touch 10 — Day 119 reconnect: a direct, one-line check-in ("Is it time?"). Restate the diagnostic offer once more. Final touch of the sequence.
+  Touch 1 — Open on the signal itself. Name one specific thing that is now at stake because of it. Make the stakes feel real and near-term, not abstract. End with a soft meeting CTA.
+  Touch 2 — Sharpen the problem: the first impression often isn't the brand's to make anymore. AI forms its own read of {{contact.company}} before a person even arrives on their site, and most companies have no idea what that read is. End on a question that creates a little unease.
+  Touch 3 — Name what the AI layer specifically does: it summarises, ranks, and recommends, and it has already formed a view of {{contact.company}} based on whatever was online before this email. You may reference the article "Protecting Your Brand's Soul in the Age of AI." End with a soft curiosity CTA — no hard ask.
+  Touch 4 — Credibility: McKinsey's research shows brand coherence is now a structural advantage in the AI era, and it has to hold across both worlds — human and AI. Frame this as a decision that compounds over time: the companies that get it right now will be harder to catch. End with a direct meeting CTA.
+  Touch 5 — Offer the free Brand Intelligence diagnostic as the obvious, low-friction next step. Make the diagnostic feel like something they would want to know regardless of whether they ever hire Starfish. End with "Want one?" or similar.
+  Touch 6 — The "two worlds, one brand" close. Make the consequence of doing nothing feel concrete and specific to their situation — not generic. This is the last hard ask. End with a meeting CTA.
+  Touch 7 — Not the right time, for now. Acknowledge they are busy. Leave the door wide open. Restate the diagnostic as an easy, no-commitment first step. No pressure, no explicit goodbye.
+  Touch 8 — Day 63 reconnect: light check-in on whether brand has become a priority since you last wrote. Restate the diagnostic. Keep it to 3–4 sentences, zero pressure, explicitly no commitments.
+  Touch 9 — Day 91 reconnect: end-of-year framing — budgets are being set, planning is happening, and this is the moment to get the read. Restate the diagnostic. Same low-pressure, no-commitments tone.
+  Touch 10 — Day 119 reconnect: one direct line ("Is it time?"). Restate the diagnostic one final time. This is the last touch — keep it short and leave on a warm note.
 
 Voice and style (fixed)
-- Warm, direct, first-person, concise. Each email is one idea and one ask, roughly 60–120 words. Touches 8–10 (the quarterly reconnects) run shorter, roughly 40–70 words, since they're brief check-ins.
+- Warm, direct, first-person, concise. Each email is one idea and one ask, roughly 60–120 words. Touches 8–10 (the quarterly reconnects) run shorter, roughly 40–70 words — brief check-ins, not pitches.
 - No em dashes. Use commas or periods.
-- Subject lines (every touch): short, plain, curiosity-driven. No colons, no emojis, no clickbait, no ALL CAPS.
-- Name Starfish once, where it lands naturally (often Touch 1). When you cite AI tools, name ChatGPT and Claude.
-- Lead with the prospect's situation, not with Starfish. Every email should feel like it was written after reading about them.
+- Name Starfish once, where it lands naturally (often Touch 1). When you cite AI tools, name ChatGPT and Claude specifically — never "AI tools" generically when you can be specific.
+- Lead with the prospect's world, not with Starfish. The first sentence of every email must be about THEM — their situation, their moment, what just happened — not about Starfish, not about you, not about the offer. The email should feel like it was written by someone who just finished reading about this company and had one thing they needed to say.
+- Do not explain what Starfish does at length. One sentence is enough. The diagnostic is the foot in the door — not the full pitch.
+
+Subject line rules (read these carefully — they determine whether the email gets opened)
+- Under 7 words. No colons, no emojis, no ALL CAPS.
+- Never use: "Quick question", "Following up", "Checking in", "Introduction", or any phrase that signals a sales email before it is opened.
+- Every subject must be SPECIFIC to this company and this touch. Generic subjects get deleted. A subject that could apply to any company is the wrong subject.
+- The subject should tease the ONE insight in that email — not the category. "What ChatGPT says about {{contact.company}}" is strong. "AI and your brand" is weak. "The gap your rebrand leaves open" is strong. "Brand strategy" is weak.
+- Use the company name, the trigger event, or a specific consequence where it sharpens the subject. A prospect should read the subject and feel a mild pull to know what you found.
+- Each of the 10 subjects must be meaningfully different from the others — no recycling the same angle across touches. Read all 10 subjects together before finalising; if two feel similar, rewrite one.
+- Touches 8–10 reconnect subjects should feel like a genuine check-in, not a follow-up pitch. Short, human, slightly personal.
+- Strong subject examples (for reference — do NOT copy these verbatim, write originals in the same spirit): "Saw the {{contact.company}} announcement", "The AI read on your rebrand", "One thing about the acquisition", "What I found looking up {{contact.company}}", "The brand gap a raise leaves open", "Six months later", "Is this the year for brand?"
 
 Personalization tokens (write these literally, exactly as shown)
 - {{contact.firstname}} — greeting. Fallback: there.
@@ -97,7 +107,7 @@ The JSON must contain exactly these keys:
 
 Every touch opens its own new thread, so every touch has its own subject line.
 
-Each email body must be plain text with one exception: meeting links must be written as HTML anchor tags, e.g. <a href="{{owner.meetings_link}}">Grab 10 minutes with me</a>. No other HTML. No markdown. Use line breaks for paragraph spacing. Do not include a signature — it is appended automatically.
+Each email body must be plain text with one exception: meeting links must be written as HTML anchor tags using the exact booking URL from the MEETING BOOKING LINK section in PROSPECT DATA — e.g. <a href="https://the-real-url-from-prospect-data">Grab 20 minutes with me</a>. Do NOT use {{owner.meetings_link}} or any placeholder. No other HTML. No markdown. Use line breaks for paragraph spacing. Do not include a signature — it is appended automatically.
 `;
 
 // ── MASTER PROMPT TOKEN ESTIMATE ─────────────────────────────────────────────
@@ -325,9 +335,12 @@ function getSignalBlock(signalType) {
  *
  * @param {object} signal — the full signal object from the pipeline
  * @param {object} contact — { name, firstName, lastName, title, email }
+ * @param {object|null} sender — { name, email, meetingLink } resolved by caller before generation.
+ *   When provided, the real meeting URL is baked into the prompt so Claude writes it directly.
+ *   When null, Claude falls back to plain-text CTAs with no booking link.
  * @returns {string}
  */
-function assembleProspectData(signal, contact) {
+function assembleProspectData(signal, contact, sender = null) {
   const signalType = signal.type || signal.signal_type || '';
   const isWebsiteVisitor = ['Website Visitor', 'website_visitor'].includes(signalType);
   const isMandA          = ['M&A Activity',    'm_and_a'].includes(signalType);
@@ -388,6 +401,26 @@ reaching out based on your knowledge of the industry — nothing more.
 `;
   }
 
+  // ── MEETING LINK ──────────────────────────────────────────────────────────
+  // Bake the real booking URL directly into the prompt so Claude writes it
+  // verbatim. Without this, Claude has no way to know whose link to use and
+  // may produce the wrong URL or hallucinate one entirely.
+  const meetingLink = sender?.meetingLink || null;
+  if (meetingLink) {
+    prospectData += `
+MEETING BOOKING LINK — use this exact URL for the <a href> on Touches 1, 4, and 6:
+${meetingLink}
+Example: <a href="${meetingLink}">Grab 10 minutes with me</a>
+Do NOT use {{owner.meetings_link}} or any other URL — use only the URL above.
+`;
+  } else {
+    prospectData += `
+MEETING BOOKING LINK: not provided.
+Do NOT invent or guess a booking URL. Write meeting requests as plain text only
+(e.g. "Would you have 15 minutes this week?") — no clickable link.
+`;
+  }
+
   return prospectData;
 }
 
@@ -421,11 +454,15 @@ reaching out based on your knowledge of the industry — nothing more.
  *   error?: string
  * }>}
  */
-async function generateClaudeEmails(signal, contact) {
+async function generateClaudeEmails(signal, contact, sender = null) {
   const signalType       = signal.type || signal.signal_type || '';
   const companyName      = signal.company_name || signal.company?.name || 'Unknown Company';
   const isWebsiteVisitor = ['Website Visitor', 'website_visitor'].includes(signalType);
   const touchCount       = isWebsiteVisitor ? 9 : 10;
+
+  if (!sender?.meetingLink) {
+    console.warn(`[Email Gen] ⚠️  No meeting link passed for ${companyName} — CTAs will be plain text. Caller should resolve sender before calling generateClaudeEmails().`);
+  }
 
   console.log(`[Email Gen] Starting generation for: ${companyName} — ${signalType} (${touchCount} touches)`);
 
@@ -448,7 +485,7 @@ async function generateClaudeEmails(signal, contact) {
   }
 
   // Assemble Part 3 (prospect data — unique per contact, never cached)
-  const prospectData = assembleProspectData(signal, contact);
+  const prospectData = assembleProspectData(signal, contact, sender);
 
   // Call Claude Sonnet with prompt caching.
   //
@@ -466,7 +503,7 @@ async function generateClaudeEmails(signal, contact) {
   try {
     const response = await anthropic.messages.create({
       model:      'claude-sonnet-4-6',
-      max_tokens: 6000,
+      max_tokens: 8000,
       system: [
         {
           type:          'text',
@@ -488,16 +525,21 @@ async function generateClaudeEmails(signal, contact) {
     });
 
     // Log cache usage so Railway logs show savings per call
-    const usage      = response.usage || {};
-    const cacheWrite = usage.cache_creation_input_tokens || 0;
-    const cacheRead  = usage.cache_read_input_tokens     || 0;
-    const freshInput = usage.input_tokens                || 0;
+    const usage       = response.usage || {};
+    const cacheWrite  = usage.cache_creation_input_tokens || 0;
+    const cacheRead   = usage.cache_read_input_tokens     || 0;
+    const freshInput  = usage.input_tokens                || 0;
+    const outputTokens = usage.output_tokens              || 0;
     cacheStats = { cacheWrite, cacheRead, freshInput };
 
     if (cacheRead > 0) {
-      console.log(`[Email Gen] Cache HIT — ${cacheRead} cached tokens + ${freshInput} fresh tokens (${companyName})`);
+      console.log(`[Email Gen] Cache HIT — ${cacheRead} cached tokens + ${freshInput} fresh + ${outputTokens} output (${companyName})`);
     } else if (cacheWrite > 0) {
-      console.log(`[Email Gen] Cache WRITE — ${cacheWrite} tokens written to cache + ${freshInput} fresh tokens (${companyName})`);
+      console.log(`[Email Gen] Cache WRITE — ${cacheWrite} tokens written + ${freshInput} fresh + ${outputTokens} output (${companyName})`);
+    }
+    // Warn if output is approaching the token limit — may indicate truncation
+    if (outputTokens > 6500) {
+      console.warn(`[Email Gen] ⚠️  Output ${outputTokens} tokens — approaching max_tokens limit; response may be truncated`);
     }
 
     rawText = response.content[0]?.text;
@@ -545,6 +587,12 @@ async function generateClaudeEmails(signal, contact) {
         .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // strip illegal control chars
 
       parsed = JSON.parse(repaired); // let this throw if still broken
+    }
+
+    // Guard: Claude must return a plain object, not an array or primitive
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.log(`[Email Gen] ✗ Claude returned unexpected JSON type: ${Array.isArray(parsed) ? 'array' : typeof parsed}`);
+      return { success: false, error: 'Claude returned unexpected JSON type — expected object', rawText };
     }
 
     emails = parsed;

@@ -308,7 +308,12 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
         email_10_body:    sub(signal.email_10_body)    || null,
       };
     } else {
-      const emailResult = await generateClaudeEmails(signal, contact);
+      const senderForGeneration = {
+        name:        senderConfig.firstName,
+        email:       route?.ownerEmail || '',
+        meetingLink: senderConfig.meetingLink || null,
+      };
+      const emailResult = await generateClaudeEmails(signal, contact, senderForGeneration);
       if (emailResult.success) {
         // Pre-fill all tokens with real values — HubSpot does not substitute tokens
         // inside contact property values, so we do it here before saving.
@@ -419,8 +424,11 @@ export async function pushSignalToHubSpot(signal, contact, airtableRecordId = nu
       email_8_body:        claudeEmails.email_8_body,
       email_9_subject:     claudeEmails.email_9_subject,
       email_9_body:        claudeEmails.email_9_body,
-      email_10_subject:    claudeEmails.email_10_subject,
-      email_10_body:       claudeEmails.email_10_body,
+      // Website Visitor uses 9 emails — omit email_10 to avoid clearing an empty field unnecessarily
+      ...(signalType !== 'Website Visitor' ? {
+        email_10_subject: claudeEmails.email_10_subject,
+        email_10_body:    claudeEmails.email_10_body,
+      } : {}),
       claude_generated:    'true',
       claude_generated_at: new Date().toISOString(),
     } : {}),

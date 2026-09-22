@@ -174,10 +174,20 @@ async function run() {
 
     enrolled.push({ record: records[i], hsContact, company, signalType, abGroup, email });
 
-    // Check if this signal type routes to a BCI sender
-    const route = getSequenceRoute(signalType, abGroup);
-    if (route && BCI_SENDERS.has(route.ownerEmail)) {
-      bciFlagged.push({ record: records[i], hsContact, company, signalType, abGroup, email, route });
+    // Determine if this contact routes to a BCI sender.
+    // For News/Press and BSI (Cole/Andrew rotation), getSequenceRoute() advances a
+    // module-level counter — calling it here in a scan loop would permanently skew
+    // the rotation for the next pipeline run. Instead, infer the sender from the
+    // signal type directly without touching the counter.
+    const inferredBciSender = (() => {
+      if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return 'david@starfishbci.com';
+      if (['Website Visitor', 'Rebrand'].includes(signalType)) return 'zack@starfishbci.com';
+      return null; // News/Press + BSI: Cole/Andrew via starfishco.com — not BCI
+    })();
+    if (inferredBciSender && BCI_SENDERS.has(inferredBciSender)) {
+      // Re-use getSequenceRoute only for non-rotation types (no counter side-effect here)
+      const route = getSequenceRoute(signalType, abGroup);
+      bciFlagged.push({ record: records[i], hsContact, company, signalType, abGroup, email, route: route || { ownerEmail: inferredBciSender } });
     }
   }
 
@@ -204,8 +214,7 @@ async function run() {
     console.log('\n  ✓ All enrolled contacts are using StarfishCo senders — no BCI senders found.');
     console.log('\n── All enrolled contacts (for reference) ─────────────────');
     for (const c of enrolled) {
-      const route = getSequenceRoute(c.signalType, c.abGroup);
-      console.log(`  ${(c.company).padEnd(30)} | ${c.signalType.padEnd(18)} | sender: ${route?.ownerEmail || '—'}`);
+      console.log(`  ${(c.company).padEnd(30)} | ${c.signalType.padEnd(18)} | ${c.abGroup}`);
     }
   }
 

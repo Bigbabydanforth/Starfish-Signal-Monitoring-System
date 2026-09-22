@@ -32,12 +32,14 @@ import { SENDER_CONFIGS } from '../hubspot/sequenceRouting.js';
 // effect — calling it from a backfill script shifts the counter for subsequent
 // pipeline runs that import the same module in a long-lived process.
 function getSenderEmailForType(signalType) {
-  const DAVID = process.env.DAVID_SENDER_EMAIL || 'david@starfishco.com';
-  const ZACK  = process.env.ZACK_SENDER_EMAIL  || 'zack@starfishco.com';
-  const COLE  = process.env.COLE_SENDER_EMAIL  || 'cole@starfishco.com';
+  const DAVID   = process.env.DAVID_SENDER_EMAIL   || 'david@starfishco.com';
+  const ZACK    = process.env.ZACK_SENDER_EMAIL    || 'zack@starfishco.com';
+  const COLE    = process.env.COLE_SENDER_EMAIL    || 'cole@starfishco.com';
+  const ANDREW  = process.env.ANDREW_SENDER_EMAIL  || 'andrew@starfishco.com';
   if (['Job Change', 'M&A Activity', 'Funding'].includes(signalType)) return DAVID;
   if (['Website Visitor', 'Rebrand'].includes(signalType)) return ZACK;
-  return COLE; // News/Press, Brand Strategy Intent
+  if (signalType === 'Brand Strategy Intent') return COLE;   // BSI → Cole (permanent)
+  return ANDREW; // News/Press → Andrew (permanent)
 }
 
 function getSenderConfig(ownerEmail) {
@@ -233,9 +235,17 @@ async function run() {
       email,
     };
 
+    const senderEmail         = getSenderEmailForType(signalType);
+    const sender              = getSenderConfig(senderEmail);
+    const senderForGeneration = {
+      name:        sender.firstName,
+      email:       senderEmail,
+      meetingLink: sender.meetingLink || null,
+    };
+
     let result;
     try {
-      result = await generateClaudeEmails(signal, contact);
+      result = await generateClaudeEmails(signal, contact, senderForGeneration);
     } catch (err) {
       console.log(`  ✗ Unexpected error: ${err.message}\n`);
       failed++;
@@ -250,9 +260,6 @@ async function run() {
       continue;
     }
 
-    // Get sender for this signal type so we can substitute all tokens
-    const senderEmail = getSenderEmailForType(signalType);
-    const sender      = getSenderConfig(senderEmail);
     const tokenVars  = {
       contactFirstName: parsed.firstName,
       contactCompany:   company,
